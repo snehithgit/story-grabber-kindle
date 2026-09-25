@@ -21,7 +21,7 @@
         <a href="/stories" data-nav="stories">Library</a>
         <a href="/settings" data-nav="settings">Settings</a>
       </nav>
-      <div class="local-note"><span class="status-dot"></span>Local only</div>
+      <div class="local-note"><span class="status-dot"></span>Private library</div>
     </aside>
 
     <div class="main-shell">
@@ -54,7 +54,7 @@
 
           <section class="panel">
             <div class="panel-head"><div><h2>Recently processed</h2><p>Newest readable stories.</p></div><a href="/stories">View library</a></div>
-            <div class="table-wrap"><table class="data-table"><thead><tr><th>Story</th><th>Folder</th><th>Status</th><th></th></tr></thead><tbody id="recent-stories"></tbody></table></div>
+            <div class="table-wrap"><table class="data-table mobile-card-table"><thead><tr><th>Story</th><th>Folder</th><th>Status</th><th></th></tr></thead><tbody id="recent-stories"></tbody></table></div>
           </section>
 
           <details class="panel engine-panel" id="engine-panel">
@@ -93,7 +93,7 @@
               <button class="btn" id="scrape-selected" type="button">Scrape selected</button>
               <button class="btn primary" id="scrape-pending" type="button">Scrape pending</button>
             </div>
-            <div class="table-wrap"><table class="data-table"><thead><tr><th class="manual-column"></th><th>Title</th><th>Status</th><th></th></tr></thead><tbody id="links-table"></tbody></table></div>
+            <div class="table-wrap"><table class="data-table mobile-card-table"><thead><tr><th class="manual-column"></th><th>Title</th><th>Status</th><th></th></tr></thead><tbody id="links-table"></tbody></table></div>
             <div class="pagination" id="links-pagination"></div>
           </section>
         </section>
@@ -107,7 +107,7 @@
               <select id="story-status"><option value="all">All statuses</option><option value="verified">Verified</option><option value="review">Needs review</option><option value="failed">Failed</option></select>
               <select id="story-sort"><option value="newest">Newest</option><option value="title">Title</option><option value="longest">Longest</option></select>
             </div>
-            <div class="table-wrap"><table class="data-table"><thead><tr><th>Story</th><th>Folder</th><th>Category</th><th>Words</th><th>Status</th><th></th></tr></thead><tbody id="stories-table"></tbody></table></div>
+            <div class="table-wrap"><table class="data-table mobile-card-table"><thead><tr><th>Story</th><th>Folder</th><th>Category</th><th>Words</th><th>Status</th><th></th></tr></thead><tbody id="stories-table"></tbody></table></div>
             <div class="pagination" id="stories-pagination"></div>
           </section>
         </section>

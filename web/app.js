@@ -104,12 +104,12 @@ function renderRows(tbody, items, compact = false) {
   for (const item of items) {
     const row = document.createElement("tr");
     if (compact) {
-      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell"></td><td>${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
+      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
       $("strong", row).textContent = item.title || "Untitled";
       $("small", row).textContent = item.source_host || item.url;
       $(".folder-cell", row).textContent = folderLabel(item);
     } else {
-      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell"></td><td class="category-cell"></td><td>${fmt(item.words)}</td><td>${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
+      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="category-cell mobile-meta" data-label="Category"></td><td class="words-cell mobile-meta" data-label="Words">${fmt(item.words)}</td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
       $("strong", row).textContent = item.title || "Untitled";
       $("small", row).textContent = item.status === "review" && item.review_reason ? item.review_reason : item.url;
       $(".folder-cell", row).textContent = item.part_number != null ? `📁 ${item.series_title} / Part ${item.part_number}` : "Single story";
@@ -183,7 +183,7 @@ async function loadLinks(page = 1) {
   for (const item of data.items) {
     const row = document.createElement("tr");
     const checked = state.selectedLinks.has(item.url) ? "checked" : "";
-    row.innerHTML = `<td class="manual-cell"><input class="link-check" type="checkbox" ${checked}></td><td class="story-cell"><strong></strong><small></small></td><td>${statusPill(item.status)}</td><td class="row-actions"><a class="btn small original-link" target="_blank" rel="noreferrer">Open</a></td>`;
+    row.innerHTML = `<td class="manual-cell mobile-meta" data-label="Select"><input class="link-check" type="checkbox" aria-label="Select story link" ${checked}></td><td class="story-cell"><strong></strong><small></small></td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><a class="btn small original-link" target="_blank" rel="noreferrer">Open</a></td>`;
     $("strong", row).textContent = item.title || item.url;
     $("small", row).textContent = item.url;
     $(".original-link", row).href = item.url;

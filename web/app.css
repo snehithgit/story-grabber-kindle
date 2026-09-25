@@ -5,3 +5,81 @@
 @media(max-width:720px){:root{--sidebar:220px}.sidebar{transform:translateX(-100%);transition:.18s}.sidebar.open{transform:translateX(0);box-shadow:0 0 0 100vmax rgba(0,0,0,.35)}.main-shell{margin-left:0}.mobile-menu{display:block}.main{padding:20px 12px}.page-heading,.reader-head{flex-direction:column}.metric-grid{grid-template-columns:1fr}.mode-picker,.library-toolbar,.toolbar{flex-direction:column;align-items:stretch}.form-row{grid-template-columns:1fr}.search-input{width:100%;min-width:0}.story-reader{padding:25px 18px;font-size:17px}}
 .auto-mode .manual-column,.auto-mode .manual-cell{display:none}
 .metric-link{display:block;color:inherit}.metric-link:hover{border-color:var(--accent);background:var(--accent-soft)}
+
+/* v3.3.1 mobile-first refinements: one DOM, table on desktop, cards on phones. */
+@media(max-width:720px){
+  body{font-size:15px}
+  .topbar{height:58px;padding:0 12px}
+  .topbar #topbar-title{font-size:14px}
+  .job-chip{max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .icon-btn{width:44px;height:44px}
+  .main{padding:16px 10px 72px}
+  .page-heading{gap:12px;margin-bottom:14px}
+  .page-heading h1{font-size:24px}
+  .page-heading .btn,.heading-actions .btn{width:100%}
+  .heading-actions{width:100%;display:grid;grid-template-columns:1fr;gap:8px}
+  .panel{padding:13px;border-radius:10px;margin-bottom:12px}
+  .panel-head{align-items:flex-start}
+  .metric{padding:13px}
+  .metric strong{font-size:22px}
+
+  /* Touch targets */
+  .btn{min-height:44px;padding:10px 13px;font-size:12px}
+  .btn.small{min-height:40px;padding:8px 11px;font-size:11px}
+  input,select{min-height:44px;font-size:16px}
+  textarea{font-size:16px}
+  .mode-picker label{min-height:56px}
+
+  /* Filters/actions become simple full-width controls. */
+  .library-toolbar,.toolbar{gap:8px}
+  .library-toolbar>* ,.toolbar>*{width:100%;min-width:0}
+
+  /* Manual selection remains visible while moving through the queue. */
+  .queue-actions:not([hidden]){
+    position:sticky;bottom:8px;z-index:8;
+    margin:0 0 10px;padding:9px;
+    border:1px solid var(--line);border-radius:10px;
+    background:var(--panel);box-shadow:var(--shadow);
+  }
+  .queue-actions #selection-count{width:100%;margin:0 0 2px}
+  .queue-actions .btn{flex:1}
+
+  /* Mobile cards replace horizontal table scrolling without duplicate markup. */
+  .table-wrap{overflow:visible;border:0;border-radius:0;background:transparent}
+  .mobile-card-table{display:block;width:100%;min-width:0}
+  .mobile-card-table thead{display:none}
+  .mobile-card-table tbody{display:grid;gap:9px;width:100%}
+  .mobile-card-table tbody tr{
+    position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto;
+    gap:5px 12px;width:100%;padding:12px;
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    box-shadow:var(--shadow);
+  }
+  .mobile-card-table tbody td{
+    display:block;width:auto;padding:2px 0;border:0;min-width:0;font-size:11px;
+  }
+  .mobile-card-table .story-cell{grid-column:1/-1;padding:0 0 7px;border-bottom:1px solid var(--line)}
+  .mobile-card-table .story-cell strong{max-width:none;white-space:normal;overflow:visible;font-size:14px;line-height:1.35}
+  .mobile-card-table .story-cell small{max-width:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:10px}
+  .mobile-card-table .mobile-meta{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--text)}
+  .mobile-card-table .mobile-meta::before{content:attr(data-label);flex:0 0 auto;color:var(--muted);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.05em}
+  .mobile-card-table .row-actions{grid-column:1/-1;display:flex;justify-content:flex-end;padding-top:6px}
+  .mobile-card-table .row-actions .btn{min-width:96px}
+  .mobile-card-table .manual-cell input{width:22px;height:22px;min-height:0;margin:0}
+  .auto-mode .mobile-card-table .manual-cell{display:none}
+
+  .pagination{justify-content:center;gap:6px;padding-top:12px}
+  .pagination button{min-width:42px;min-height:42px;font-size:12px}
+  .pagination span{padding:12px 4px}
+
+  /* Reader remains the visual focus on phones. */
+  .reader-shell{max-width:none}
+  .reader-head h1{font-size:25px}
+  .reader-tabs{overflow-x:auto;white-space:nowrap}
+  .reader-tabs button{min-height:44px;padding:10px 13px}
+  .story-reader{padding:22px 15px 32px;font-size:18px;line-height:1.72}
+  .speaker{font-size:13px}
+  .review-text{min-height:240px}
+  .toast-stack{left:10px;right:10px;bottom:10px}
+  .toast{max-width:none}
+}

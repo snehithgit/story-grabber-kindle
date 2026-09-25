@@ -1,8 +1,18 @@
-# Story Grabber v3.3
+# Story Grabber v3.3.1
 
 A local-first web application for crawling story sites, extracting story text, fixing readability without changing the wording, romanizing Telugu, grouping multipart stories, and organizing the result into a simple local library.
 
-The web server binds only to `127.0.0.1`.
+Native launches bind only to `127.0.0.1` by default. Docker starts Story Grabber with explicit private-LAN mode so the same web app can be opened from phones/tablets on your LAN while public-host and cross-origin requests remain blocked.
+
+
+## v3.3.1: Docker/LAN + mobile view
+
+- Native `python web_server.py` remains localhost-only.
+- Docker launches with `--host 0.0.0.0 --allow-lan`. Only loopback/private/link-local clients and loopback/private-IP Host headers are accepted.
+- Browser POST requests must remain same-origin; cross-site POSTs are rejected.
+- `docker-compose.yml` publishes `8000:8000`, allowing the UI to be opened from a phone with `http://<PC-LAN-IP>:8000`.
+- Below 720 px, Sources/Library/Recent tables become touch-friendly cards instead of horizontally scrolling tables.
+- Mobile controls use larger touch targets; manual scrape actions become sticky; reader spacing is optimized for a phone.
 
 ## Workflow
 
@@ -362,5 +372,3 @@ The v3 changes intentionally follow KISS/DRY/SOLID/YAGNI principles:
 - multipart grouping supports `Part N`, `Pt. N`, and bare trailing sequence numbers such as `Story Name 1`;
 - review and logs are contextual instead of adding more permanent navigation pages;
 - auto organization is incremental, so a large library is not recopied after every scrape batch.
-#   s t o r y - g r a b b e r - k i n d l e  
- 

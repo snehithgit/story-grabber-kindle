@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Story Grabber local web application.
+"""Story Grabber web application.
 
 Workflow:
     crawl links -> extract immutable raw HTML -> format + exact verification
     -> optional Telugu romanization -> searchable story library
 
-The HTTP server binds only to localhost and uses only Python's standard library.
+Native launches are localhost-only by default. Docker/LAN access must be enabled
+explicitly with --allow-lan; requests are then limited to private/loopback clients
+and private/loopback Host headers, with same-origin POST protection.
 """
 
 from __future__ import annotations
@@ -590,19 +592,63 @@ class AppHandler(BaseHTTPRequestHandler):
         )
         super().end_headers()
 
+    @staticmethod
+    def _private_or_loopback(address: ipaddress._BaseAddress) -> bool:
+        return bool(address.is_loopback or address.is_private or address.is_link_local)
+
+    def _request_hostname(self) -> str:
+        raw = (self.headers.get("Host") or "").strip()
+        if not raw:
+            return ""
+        try:
+            return (urlparse("//" + raw).hostname or "").rstrip(".").lower()
+        except ValueError:
+            return ""
+
     def local_request_allowed(self) -> bool:
         try:
-            address = ipaddress.ip_address(self.client_address[0])
+            client = ipaddress.ip_address(self.client_address[0])
         except ValueError:
             return False
-        host = (self.headers.get("Host") or "").lower()
-        host_ok = host == "localhost" or host.startswith("localhost:") or host == "127.0.0.1" or host.startswith("127.0.0.1:")
-        return address.is_loopback and host_ok
+
+        hostname = self._request_hostname()
+        if not hostname:
+            return False
+
+        if hostname == "localhost":
+            host_ok = True
+        else:
+            try:
+                host_ip = ipaddress.ip_address(hostname)
+            except ValueError:
+                host_ok = False
+            else:
+                host_ok = self._private_or_loopback(host_ip)
+
+        allow_lan = bool(getattr(self.server, "allow_lan", False))
+        if allow_lan:
+            return self._private_or_loopback(client) and host_ok
+        return client.is_loopback and host_ok and (hostname == "localhost" or ipaddress.ip_address(hostname).is_loopback)
+
+    def same_origin_post_allowed(self) -> bool:
+        # Non-browser clients may omit Origin; the network/Host checks above still apply.
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return False
+        if parsed.scheme not in {"http", "https"}:
+            return False
+        request_host = (self.headers.get("Host") or "").strip().lower()
+        return bool(parsed.netloc and parsed.netloc.lower() == request_host)
 
     def reject_non_local(self) -> bool:
         if self.local_request_allowed():
             return False
-        self.send_error(HTTPStatus.FORBIDDEN, "Local access only")
+        message = "Private LAN/local access only" if getattr(self.server, "allow_lan", False) else "Local access only"
+        self.send_error(HTTPStatus.FORBIDDEN, message)
         return True
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -711,9 +757,12 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         if self.reject_non_local():
             return
-        origin = self.headers.get("Origin")
-        if origin and urlparse(origin).hostname not in {"localhost", "127.0.0.1"}:
+        if not self.same_origin_post_allowed():
             self.send_error(HTTPStatus.FORBIDDEN, "Cross-origin request rejected")
+            return
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").lower()
+        if fetch_site == "cross-site":
+            self.send_error(HTTPStatus.FORBIDDEN, "Cross-site request rejected")
             return
         route, _ = self._query()
         try:
@@ -889,8 +938,15 @@ class AppHandler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Story Grabber local web application")
+    parser = argparse.ArgumentParser(description="Story Grabber web application")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default=os.environ.get("STORY_GRABBER_HOST", "127.0.0.1"))
+    parser.add_argument(
+        "--allow-lan",
+        action="store_true",
+        default=os.environ.get("STORY_GRABBER_ALLOW_LAN", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="Allow private-LAN clients/hosts. Native default remains localhost-only.",
+    )
     args = parser.parse_args()
     settings = load_settings()
     if not SETTINGS_FILE.is_file():
@@ -913,8 +969,12 @@ def main() -> int:
             )
     finally:
         conn.close()
-    server = LocalThreadingHTTPServer(("127.0.0.1", args.port), AppHandler)
-    print(f"Story Grabber: http://127.0.0.1:{args.port}")
+    server = LocalThreadingHTTPServer((args.host, args.port), AppHandler)
+    server.allow_lan = bool(args.allow_lan)
+    if args.allow_lan:
+        print(f"Story Grabber: http://127.0.0.1:{args.port} (private LAN enabled on {args.host}:{args.port})")
+    else:
+        print(f"Story Grabber: http://127.0.0.1:{args.port}")
     print("Raw pages are preserved; formatted/romanized copies are verified separately.")
     print("Press Ctrl+C to stop.")
     try:
