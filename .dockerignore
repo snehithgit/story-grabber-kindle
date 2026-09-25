@@ -1,0 +1,16 @@
+.git
+.github
+content_output
+story-grabber-data
+sublinks.json
+sublinks.json.progress
+sites.txt
+cli/parser/node_modules
+cli/content_browser_profile
+__pycache__
+*.pyc
+*.pyo
+*.zip
+*.log
+.vscode
+.idea

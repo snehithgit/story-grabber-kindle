@@ -1,0 +1,20 @@
+{
+  "name": "sublink-content-parser",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lightweight HTML content parser using Defuddle with Mozilla Readability fallback",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "defuddle": "0.19.4",
+    "linkedom": "0.18.13",
+    "playwright": "1.63.0"
+  },
+  "scripts": {
+    "parse": "node parser_engine.mjs",
+    "extract": "node content_engine.mjs"
+  }
+}

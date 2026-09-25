@@ -1,0 +1,17 @@
+{
+  "crawler_depth": 1,
+  "crawler_max_pages": 1000,
+  "crawler_delay": 0.25,
+  "content_workers": 3,
+  "content_delay_ms": 500,
+  "content_limit": 0,
+  "browser_mode": "background",
+  "auto_romanize": true,
+  "formatter_sentence_target": 4,
+  "formatter_long_block_chars": 900,
+  "formatter_review_block_chars": 1800,
+  "stories_per_page": 50,
+  "scrape_mode": "manual",
+  "auto_scrape_batch_size": 20,
+  "categories": []
+}

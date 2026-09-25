@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Story Grabber</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/dashboard" data-nav="dashboard">
+        <span class="brand-mark">SG</span>
+        <span><strong>Story Grabber</strong><small>Local library</small></span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a href="/dashboard" data-nav="dashboard">Dashboard</a>
+        <a href="/sources" data-nav="sources">Sources</a>
+        <a href="/stories" data-nav="stories">Library</a>
+        <a href="/settings" data-nav="settings">Settings</a>
+      </nav>
+      <div class="local-note"><span class="status-dot"></span>Local only</div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <button class="icon-btn mobile-menu" id="menu-button" type="button" aria-label="Open menu">☰</button>
+        <strong id="topbar-title">Dashboard</strong>
+        <div class="topbar-actions">
+          <span class="job-chip" id="job-chip"><span class="status-dot"></span><span id="job-chip-text">Idle</span></span>
+          <button class="icon-btn" id="theme-button" type="button" aria-label="Change theme">◐</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="page" data-page="dashboard">
+          <div class="page-heading">
+            <div><p class="eyebrow">Overview</p><h1>Story library</h1><p>Discover, process, organize and read stories.</p></div>
+            <a class="btn primary" href="/sources">Add source</a>
+          </div>
+
+          <div class="metric-grid">
+            <article class="metric"><span>Links</span><strong id="metric-links">0</strong><small id="metric-pending">0 pending</small></article>
+            <article class="metric"><span>Stories</span><strong id="metric-stories">0</strong><small id="metric-verified">0 verified</small></article>
+            <a class="metric metric-link" href="/stories?status=review"><span>Review</span><strong id="metric-review">0</strong><small id="metric-failed">0 failed · open queue</small></a>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head"><div><h2>Sources</h2><p>Crawl and scrape progress.</p></div><a href="/sources">Manage</a></div>
+            <div id="source-summary"><div class="empty-state">No sources yet.</div></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head"><div><h2>Recently processed</h2><p>Newest readable stories.</p></div><a href="/stories">View library</a></div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>Story</th><th>Folder</th><th>Status</th><th></th></tr></thead><tbody id="recent-stories"></tbody></table></div>
+          </section>
+
+          <details class="panel engine-panel" id="engine-panel">
+            <summary><strong>Engine status &amp; logs</strong><span id="engine-summary">Idle</span></summary>
+            <div class="job-cards" id="job-cards"></div>
+            <div class="console-head"><span id="log-subtitle">No engine selected</span><button class="btn small" id="copy-log" type="button">Copy log</button></div>
+            <pre class="console" id="job-log">No job has run yet.</pre>
+          </details>
+        </section>
+
+        <section class="page" data-page="sources">
+          <div class="page-heading"><div><p class="eyebrow">Acquisition</p><h1>Sources</h1><p>Choose automatic or manual scraping, then start the crawl.</p></div></div>
+
+          <section class="panel">
+            <form id="crawl-form" class="stack-form">
+              <fieldset class="mode-picker">
+                <legend>Scrape mode</legend>
+                <label><input type="radio" name="scrape_mode_run" value="auto"><span><strong>Auto</strong><small>Scrape new links while the crawler is still running.</small></span></label>
+                <label><input type="radio" name="scrape_mode_run" value="manual"><span><strong>Manual</strong><small>Only collect links. You decide what to scrape.</small></span></label>
+              </fieldset>
+              <label class="field"><span>Starting URLs</span><textarea id="sites-input" rows="3" placeholder="https://example.com/stories/"></textarea><small>One URL per line.</small></label>
+              <div class="form-row">
+                <label class="field"><span>Depth</span><input id="crawl-depth" type="number" min="0" max="10"></label>
+                <label class="field"><span>Page limit</span><input id="crawl-pages" type="number" min="1" max="250000"></label>
+                <label class="field"><span>Delay (sec)</span><input id="crawl-delay" type="number" min="0" max="60" step="0.05"></label>
+                <label class="check-field"><input id="crawl-fresh" type="checkbox"><span>Start fresh</span></label>
+              </div>
+              <div class="form-actions"><button class="btn primary" id="start-crawl" type="submit">Start</button><button class="btn danger" id="stop-acquisition" type="button">Stop</button><span class="form-message" id="crawl-message"></span></div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head link-head"><div><h2>Links</h2><p><span id="links-total">0</span> found.</p></div><div class="toolbar"><input class="search-input" id="links-search" type="search" placeholder="Search links"><select id="links-status"><option value="all">All</option><option value="pending">Pending</option><option value="scraped">Scraped</option><option value="failed">Failed</option></select></div></div>
+            <div class="queue-actions" id="manual-actions">
+              <label><input type="checkbox" id="links-select-all"> Select page</label><span id="selection-count">0 selected</span>
+              <button class="btn" id="scrape-selected" type="button">Scrape selected</button>
+              <button class="btn primary" id="scrape-pending" type="button">Scrape pending</button>
+            </div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th class="manual-column"></th><th>Title</th><th>Status</th><th></th></tr></thead><tbody id="links-table"></tbody></table></div>
+            <div class="pagination" id="links-pagination"></div>
+          </section>
+        </section>
+
+        <section class="page" data-page="stories">
+          <div class="page-heading"><div><p class="eyebrow">Library</p><h1>Stories</h1><p>Readable formatting, multipart grouping and categories are handled automatically.</p></div><button class="btn" id="run-formatter" type="button">Recheck formatting</button></div>
+          <section class="panel">
+            <div class="library-toolbar">
+              <input class="search-input grow" id="story-search" type="search" placeholder="Search stories">
+              <select id="story-category"><option value="all">All categories</option></select>
+              <select id="story-status"><option value="all">All statuses</option><option value="verified">Verified</option><option value="review">Needs review</option><option value="failed">Failed</option></select>
+              <select id="story-sort"><option value="newest">Newest</option><option value="title">Title</option><option value="longest">Longest</option></select>
+            </div>
+            <div class="table-wrap"><table class="data-table"><thead><tr><th>Story</th><th>Folder</th><th>Category</th><th>Words</th><th>Status</th><th></th></tr></thead><tbody id="stories-table"></tbody></table></div>
+            <div class="pagination" id="stories-pagination"></div>
+          </section>
+        </section>
+
+        <section class="page" data-page="settings">
+          <div class="page-heading"><div><p class="eyebrow">Configuration</p><h1>Settings</h1><p>Only settings you are likely to change regularly are shown first.</p></div></div>
+          <form id="settings-form" class="settings-stack">
+            <section class="panel">
+              <div class="panel-head"><div><h2>Categories</h2><p>One category per line. The first name found in the title or story text wins.</p></div></div>
+              <label class="field"><span>Category names</span><textarea name="categories" rows="7" placeholder="Family\nCollege\nRomance"></textarea><small>Stories are organized under <code>content_output/library/&lt;Category&gt;/</code>. Stories with no match go to Uncategorized.</small></label>
+            </section>
+            <section class="panel">
+              <div class="panel-head"><div><h2>Defaults</h2><p>Used when starting a new crawl.</p></div></div>
+              <div class="settings-grid-simple">
+                <label class="field"><span>Default scrape mode</span><select name="scrape_mode"><option value="auto">Auto</option><option value="manual">Manual</option></select></label>
+                <label class="field"><span>Auto batch size</span><input name="auto_scrape_batch_size" type="number" min="1" max="200"></label>
+                <label class="field"><span>Stories per page</span><input name="stories_per_page" type="number" min="10" max="100"></label>
+                <label class="check-field"><input name="auto_romanize" type="checkbox"><span>Romanize Telugu automatically</span></label>
+              </div>
+            </section>
+            <details class="panel advanced-settings">
+              <summary><strong>Advanced crawler settings</strong></summary>
+              <div class="settings-grid-simple details-body">
+                <label class="field"><span>Crawl depth</span><input name="crawler_depth" type="number" min="0" max="10"></label>
+                <label class="field"><span>Crawl page limit</span><input name="crawler_max_pages" type="number" min="1" max="250000"></label>
+                <label class="field"><span>Crawl delay (sec)</span><input name="crawler_delay" type="number" min="0" max="60" step="0.05"></label>
+                <label class="field"><span>Scrape workers</span><input name="content_workers" type="number" min="1" max="8"></label>
+                <label class="field"><span>Scrape delay (ms)</span><input name="content_delay_ms" type="number" min="0" max="60000"></label>
+                <label class="field"><span>Scrape limit (0 = all)</span><input name="content_limit" type="number" min="0" max="250000"></label>
+                <label class="field"><span>Browser mode</span><select name="browser_mode"><option value="background">Background</option><option value="headless">Headless</option><option value="visible">Visible</option></select></label>
+              </div>
+            </details>
+            <div class="form-actions"><button class="btn primary" type="submit">Save settings</button><span class="form-message" id="settings-message"></span></div>
+          </form>
+        </section>
+
+        <section class="page" data-page="story">
+          <div class="reader-shell">
+            <a class="back-link" href="/stories">← Library</a>
+            <header class="reader-head"><div><p class="eyebrow" id="reader-folder">Story</p><h1 id="reader-title">Loading…</h1><div class="reader-meta" id="reader-meta"></div></div><div class="heading-actions"><button class="btn" id="copy-story" type="button">Copy</button><a class="btn" id="open-original" target="_blank" rel="noreferrer">Website</a></div></header>
+            <div class="reader-tabs"><button class="active" data-reader-tab="romanized" type="button">Romanized</button><button data-reader-tab="formatted" type="button">Formatted</button><button data-reader-tab="original" type="button">Original</button></div>
+            <article class="story-reader" id="story-reader"></article>
+
+            <details class="panel review-tools" id="review-tools" hidden>
+              <summary><strong>Formatting review</strong><span id="review-reason"></span></summary>
+              <p class="helper">Automatic checks found a readability issue. You may change line and paragraph breaks only; any wording change is rejected.</p>
+              <div class="split-review">
+                <label class="field"><span>Original</span><textarea id="review-original" class="review-text" readonly></textarea></label>
+                <label class="field"><span>Readable version</span><textarea id="review-formatted" class="review-text"></textarea></label>
+              </div>
+              <div class="form-actions details-body"><button class="btn primary" data-review-action="save" type="button">Save breaks</button><button class="btn" data-review-action="accept" type="button">Accept as-is</button><button class="btn" data-review-action="original" type="button">Use original breaks</button><button class="btn" data-review-action="reformat" type="button">Run formatter</button></div>
+            </details>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

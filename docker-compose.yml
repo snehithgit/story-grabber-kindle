@@ -1,0 +1,13 @@
+services:
+  story-grabber:
+    image: ghcr.io/snehithgit/story-grabber-kindle:latest
+    container_name: story-grabber-kindle
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8000:8080"
+
+    volumes:
+      - ./story-grabber-data:/data
+
+    shm_size: "1gb"

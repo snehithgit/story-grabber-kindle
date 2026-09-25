@@ -1,0 +1,4 @@
+# Installed with --no-deps by extract_cli.py so the vulnerable, unused js2py
+# interpreter is not pulled in. The required runtime packages are listed in
+# requirements.txt; this project uses Cloudscraper's Node.js interpreter.
+cloudscraper @ git+https://github.com/VeNoMouS/cloudscraper.git@9ea528a8675f1bebd49ff853d142e94988a95178
