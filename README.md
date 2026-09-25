@@ -1,3 +1,5 @@
+# Story Grabber v3.3.2
+
 # Story Grabber v3.3.1
 
 A local-first web application for crawling story sites, extracting story text, fixing readability without changing the wording, romanizing Telugu, grouping multipart stories, and organizing the result into a simple local library.
@@ -372,3 +374,14 @@ The v3 changes intentionally follow KISS/DRY/SOLID/YAGNI principles:
 - multipart grouping supports `Part N`, `Pt. N`, and bare trailing sequence numbers such as `Story Name 1`;
 - review and logs are contextual instead of adding more permanent navigation pages;
 - auto organization is incremental, so a large library is not recopied after every scrape batch.
+
+
+## v3.3.2 category priority
+
+Category assignment is deterministic and two-stage:
+
+1. Search configured category names in the story title. The first configured title match wins.
+2. Only when the title has no match, search original/formatted/romanized story content.
+3. If nothing matches, use `Uncategorized`.
+
+The Library page includes **Re-categorize Library**. It reapplies this rule to all existing verified/review stories, rebuilds only `content_output/library/`, moves multipart groups together, and regenerates Kindle `library.json`. Raw, formatted and romanized source artifacts are not modified.

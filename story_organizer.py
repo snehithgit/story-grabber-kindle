@@ -89,16 +89,40 @@ def normalize_categories(values: Iterable[object]) -> list[str]:
     return result[:200]
 
 
-def match_category(categories: Iterable[str], *texts: str) -> str:
-    """Return the first configured category whose name occurs in story text."""
-    haystack = "\n".join(str(text or "") for text in texts).casefold()
+def _category_in_text(categories: Iterable[str], text: str) -> str | None:
+    """Return the first configured category found in one text field."""
+    haystack = str(text or "").casefold()
     for category in normalize_categories(categories):
         needle = category.casefold()
         # Phrase boundary that works for both normal words and punctuation-heavy names.
         pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
         if re.search(pattern, haystack, re.IGNORECASE):
             return category
-    return "Uncategorized"
+    return None
+
+
+def match_category_with_source(categories: Iterable[str], title: str, *story_texts: str) -> tuple[str, str]:
+    """Categorize with strict priority: title first, story content second.
+
+    The category list order is respected within each phase.  A category found
+    anywhere in the title therefore always wins over every body-only match.
+    Only when the title contains no configured category do we inspect story
+    content.
+    """
+    title_match = _category_in_text(categories, title)
+    if title_match:
+        return title_match, "title"
+
+    body = "\n".join(str(text or "") for text in story_texts)
+    body_match = _category_in_text(categories, body)
+    if body_match:
+        return body_match, "content"
+    return "Uncategorized", "none"
+
+
+def match_category(categories: Iterable[str], title: str, *story_texts: str) -> str:
+    """Return category using title-first, content-second matching."""
+    return match_category_with_source(categories, title, *story_texts)[0]
 
 
 def ensure_story_columns(conn: sqlite3.Connection) -> None:
@@ -145,27 +169,36 @@ def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iter
     prepared: list[dict[str, object]] = []
     for row in rows:
         series_title, part_number = parse_story_part(row["title"])
-        category = match_category(
+        category, category_source = match_category_with_source(
             categories,
             row["title"],
             row["original_text"],
             row["formatted_text"],
             row["romanized_text"],
         )
-        prepared.append({"row": row, "series": series_title, "part": part_number, "category": category})
+        prepared.append({
+            "row": row, "series": series_title, "part": part_number,
+            "category": category, "category_source": category_source,
+        })
 
-    # If any part in a multipart series matches a category, keep every part in
-    # the same series folder.  First configured category wins deterministically.
-    order = {name.casefold(): index for index, name in enumerate(normalize_categories(categories))}
-    series_categories: dict[str, str] = {}
+    # Multipart stories stay in one category.  A title match in ANY part wins
+    # over every content-only match in the series.  Within the same phase, the
+    # configured category order remains deterministic.
+    configured = normalize_categories(categories)
+    order = {name.casefold(): index for index, name in enumerate(configured)}
+    source_rank = {"title": 0, "content": 1, "none": 2}
+    series_best: dict[str, tuple[tuple[int, int], str]] = {}
     for item in prepared:
         if item["part"] is None:
             continue
         key = str(item["series"]).casefold()
         candidate = str(item["category"])
-        current = series_categories.get(key)
-        if current is None or order.get(candidate.casefold(), 10**9) < order.get(current.casefold(), 10**9):
-            series_categories[key] = candidate
+        scope = str(item["category_source"])
+        rank = (source_rank.get(scope, 2), order.get(candidate.casefold(), 10**9))
+        current = series_best.get(key)
+        if current is None or rank < current[0]:
+            series_best[key] = (rank, candidate)
+    series_categories = {key: value[1] for key, value in series_best.items()}
 
     copied = 0
     groups: set[str] = set()
@@ -264,6 +297,7 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
     targets: dict[str, sqlite3.Row] = {}
     configured = normalize_categories(categories)
     order = {name.casefold(): index for index, name in enumerate(configured)}
+    source_rank = {"title": 0, "content": 1, "none": 2}
     for series_key in affected_series:
         siblings = conn.execute(
             "SELECT * FROM stories WHERE part_number IS NOT NULL AND lower(series_title)=? AND status IN ('verified','review')",
@@ -271,10 +305,17 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
         ).fetchall()
         if not siblings:
             continue
-        group_category = min(
-            (str(row["category"] or "Uncategorized") for row in siblings),
-            key=lambda name: order.get(name.casefold(), 10**9),
-        )
+        ranked = []
+        for sibling in siblings:
+            category, scope = match_category_with_source(
+                configured,
+                sibling["title"],
+                sibling["original_text"],
+                sibling["formatted_text"],
+                sibling["romanized_text"],
+            )
+            ranked.append(((source_rank.get(scope, 2), order.get(category.casefold(), 10**9)), category))
+        group_category = min(ranked, key=lambda item: item[0])[1]
         conn.execute(
             "UPDATE stories SET category=? WHERE part_number IS NOT NULL AND lower(series_title)=?",
             (group_category, series_key),

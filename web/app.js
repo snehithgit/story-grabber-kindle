@@ -397,6 +397,24 @@ $("#scrape-pending").addEventListener("click", () => startContent({ pending_only
 // Library
 $("#story-search").addEventListener("input", debounce(() => loadStories(1)));
 for (const id of ["story-category", "story-status", "story-sort"]) $("#" + id).addEventListener("change", () => loadStories(1));
+$("#recategorize-library").addEventListener("click", async () => {
+  const button = $("#recategorize-library");
+  if (!confirm("Re-categorize all existing stories using title first, then story content? This only rebuilds the organized library; raw/formatted stories are not changed.")) return;
+  button.disabled = true;
+  const oldText = button.textContent;
+  button.textContent = "Re-categorizing…";
+  try {
+    const result = await api("/api/library/recategorize", { method: "POST", body: "{}" });
+    toast(result.message, "success");
+    await loadSummary();
+    await loadStories(1);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = oldText;
+  }
+});
 $("#run-formatter").addEventListener("click", async () => {
   try { const result = await api("/api/start/format", { method: "POST", body: JSON.stringify({ force: true }) }); toast(result.message, "success"); navigate("/dashboard"); $("#engine-panel").open = true; }
   catch (error) { toast(error.message, "error"); }

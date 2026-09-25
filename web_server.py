@@ -860,6 +860,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "message": "Story formatter started."}, 202)
                 return
 
+            if route == "/api/library/recategorize":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                settings = load_settings()
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    result = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []))
+                finally:
+                    conn.close()
+                self.send_json({
+                    "ok": True,
+                    "message": f"Re-categorized {result.get('stories', 0)} story files with title-first rules.",
+                    "organization": result,
+                })
+                return
+
             if route.startswith("/api/stop/"):
                 name = route.rsplit("/", 1)[-1]
                 JOBS.stop(name)

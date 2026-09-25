@@ -99,7 +99,7 @@
         </section>
 
         <section class="page" data-page="stories">
-          <div class="page-heading"><div><p class="eyebrow">Library</p><h1>Stories</h1><p>Readable formatting, multipart grouping and categories are handled automatically.</p></div><button class="btn" id="run-formatter" type="button">Recheck formatting</button></div>
+          <div class="page-heading"><div><p class="eyebrow">Library</p><h1>Stories</h1><p>Readable formatting, multipart grouping and categories are handled automatically.</p></div><div class="heading-actions"><button class="btn" id="recategorize-library" type="button">Re-categorize Library</button><button class="btn" id="run-formatter" type="button">Recheck formatting</button></div></div>
           <section class="panel">
             <div class="library-toolbar">
               <input class="search-input grow" id="story-search" type="search" placeholder="Search stories">
@@ -116,8 +116,8 @@
           <div class="page-heading"><div><p class="eyebrow">Configuration</p><h1>Settings</h1><p>Only settings you are likely to change regularly are shown first.</p></div></div>
           <form id="settings-form" class="settings-stack">
             <section class="panel">
-              <div class="panel-head"><div><h2>Categories</h2><p>One category per line. The first name found in the title or story text wins.</p></div></div>
-              <label class="field"><span>Category names</span><textarea name="categories" rows="7" placeholder="Family\nCollege\nRomance"></textarea><small>Stories are organized under <code>content_output/library/&lt;Category&gt;/</code>. Stories with no match go to Uncategorized.</small></label>
+              <div class="panel-head"><div><h2>Categories</h2><p>One category per line. Category matching checks the story title first; only when no title match exists does it search the story content.</p></div></div>
+              <label class="field"><span>Category names</span><textarea name="categories" rows="7" placeholder="Family\nCollege\nRomance"></textarea><small>Priority: <b>title → story content → Uncategorized</b>. The first configured match within each phase wins. Existing stories can be updated from Library → Re-categorize Library.</small></label>
             </section>
             <section class="panel">
               <div class="panel-head"><div><h2>Defaults</h2><p>Used when starting a new crawl.</p></div></div>

@@ -19,9 +19,18 @@ class StoryOrganizerTests(unittest.TestCase):
         self.assertEqual(parse_story_part("My Story Episode 4"), ("My Story Episode 4", None))
         self.assertEqual(parse_story_part("My Story 2026"), ("My Story 2026", None))
 
-    def test_category_uses_first_configured_match(self):
-        self.assertEqual(match_category(["College", "Family"], "A Family story at College"), "College")
-        self.assertEqual(match_category(["Romance"], "Unrelated text"), "Uncategorized")
+    def test_category_uses_title_first_then_content(self):
+        # Title phase wins even if an earlier configured category is present only in body.
+        self.assertEqual(
+            match_category(["College", "Family"], "A Family Story", "College appears in the body"),
+            "Family",
+        )
+        # If title has no configured match, scan body using configured category order.
+        self.assertEqual(
+            match_category(["College", "Family"], "A Story", "Family and College are both in body"),
+            "College",
+        )
+        self.assertEqual(match_category(["Romance"], "Unrelated title", "Unrelated text"), "Uncategorized")
 
     def test_multipart_parts_share_category_folder(self):
         with tempfile.TemporaryDirectory() as td:
@@ -57,6 +66,41 @@ class StoryOrganizerTests(unittest.TestCase):
             self.assertEqual([row["category"] for row in rows], ["College", "College"])
             self.assertTrue((root / "library" / "College" / "Moon Story" / "Part 001.html").is_file())
             self.assertTrue((root / "library" / "College" / "Moon Story" / "Part 002.html").is_file())
+            conn.close()
+
+    def test_multipart_title_match_beats_body_match(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "romanized_pages").mkdir()
+            (root / "romanized_pages" / "p1.html").write_text("part one", encoding="utf-8")
+            (root / "romanized_pages" / "p2.html").write_text("part two", encoding="utf-8")
+            conn = sqlite3.connect(root / "story_library.sqlite3")
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                CREATE TABLE stories (
+                    url TEXT PRIMARY KEY,title TEXT NOT NULL,source_host TEXT NOT NULL DEFAULT '',words INTEGER NOT NULL DEFAULT 0,
+                    raw_file TEXT NOT NULL DEFAULT '',formatted_file TEXT NOT NULL DEFAULT '',romanized_file TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'verified',integrity_exact INTEGER NOT NULL DEFAULT 1,telugu INTEGER NOT NULL DEFAULT 0,
+                    romanized INTEGER NOT NULL DEFAULT 1,paragraphs INTEGER NOT NULL DEFAULT 0,dialogue_breaks INTEGER NOT NULL DEFAULT 0,
+                    review_reason TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '',raw_sha256 TEXT NOT NULL DEFAULT '',
+                    original_text TEXT NOT NULL DEFAULT '',formatted_text TEXT NOT NULL DEFAULT '',romanized_text TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',manual_accept INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            ensure_story_columns(conn)
+            conn.executemany(
+                "INSERT INTO stories(url,title,romanized_file,original_text,romanized_text) VALUES(?,?,?,?,?)",
+                [
+                    ("https://x/1", "Family Moon Part 1", "p1.html", "College is in body", "College is in body"),
+                    ("https://x/2", "Family Moon Part 2", "p2.html", "College is also in body", "College is also in body"),
+                ],
+            )
+            conn.commit()
+            organize_urls(conn, root, ["College", "Family"], ["https://x/1", "https://x/2"])
+            rows = conn.execute("SELECT category FROM stories ORDER BY part_number").fetchall()
+            self.assertEqual([row["category"] for row in rows], ["Family", "Family"])
+            self.assertTrue((root / "library" / "Family" / "Family Moon" / "Part 001.html").is_file())
+            self.assertTrue((root / "library" / "Family" / "Family Moon" / "Part 002.html").is_file())
             conn.close()
 
     def test_bare_number_parts_share_series_folder(self):
