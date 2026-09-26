@@ -588,6 +588,16 @@ $("#recategorize-library").addEventListener("click", async () => {
     button.textContent = oldText;
   }
 });
+$("#reromanize-library").addEventListener("click", async () => {
+  if (!confirm("Rebuild Romanized text for all existing Telugu stories using the improved Tenglish engine? Raw and formatted stories are not changed.")) return;
+  try {
+    const result = await api("/api/start/romanize", { method: "POST", body: "{}" });
+    toast(result.message, "success");
+    navigate("/dashboard");
+    $("#engine-panel").open = true;
+  } catch (error) { toast(error.message, "error"); }
+});
+
 $("#run-formatter").addEventListener("click", async () => {
   try { const result = await api("/api/start/format", { method: "POST", body: JSON.stringify({ force: true }) }); toast(result.message, "success"); navigate("/dashboard"); $("#engine-panel").open = true; }
   catch (error) { toast(error.message, "error"); }

@@ -219,24 +219,28 @@ def distance(a: str, b: str) -> float:
 
 class EnglishMatcher:
     def __init__(self, wordlist: Path | None, dictionary: Path | None, auto: bool,
-                 dataset: Path | None = None):
+                 dataset: Path | None = None, common: Path | None = None):
         self.user: dict[str, str] = {}
+        self.common: dict[str, str] = {}
         self.dataset: dict[str, str] = {}
         self.index: dict[str, list[tuple[int, str, str]]] = {}
-        if dictionary and dictionary.is_file():
-            for line in dictionary.read_text(encoding="utf-8-sig").splitlines():
+
+        def load_map(path: Path | None, target: dict[str, str], *, flexible: bool = True) -> None:
+            if not path or not path.is_file():
+                return
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
                 if not line.strip() or line.lstrip().startswith("#"):
                     continue
-                parts = re.split(r"\t|\s{2,}|=", line.strip(), maxsplit=1)
+                parts = (
+                    re.split(r"\t|\s{2,}|=", line.strip(), maxsplit=1)
+                    if flexible else line.split("\t", 1)
+                )
                 if len(parts) == 2:
-                    self.user[parts[0].strip()] = parts[1].strip()
-        if dataset and dataset.is_file():
-            for line in dataset.read_text(encoding="utf-8-sig").splitlines():
-                if not line.strip() or line.lstrip().startswith("#"):
-                    continue
-                parts = line.split("\t", 1)
-                if len(parts) == 2:
-                    self.dataset[parts[0].strip()] = parts[1].strip()
+                    target[parts[0].strip()] = parts[1].strip()
+
+        load_map(dictionary, self.user)
+        load_map(common, self.common)
+        load_map(dataset, self.dataset, flexible=False)
         if auto and wordlist and wordlist.is_file():
             rank = 0
             for line in wordlist.read_text(encoding="utf-8").splitlines():
@@ -250,6 +254,32 @@ class EnglishMatcher:
                 rank += 1
             self.size = rank
         self.detected: dict[str, tuple[str, str, float]] = {}
+        self.dataset_rejected = 0
+
+    def dataset_choice(self, word: str, style: str = "casual") -> str | None:
+        """Return a corpus spelling only when it is independently trustworthy.
+
+        The historical ``tenglish_words.tsv`` file was built from automatically
+        aligned ASR sentence pairs.  It contains useful English-loanword spellings
+        but also bad alignments such as ``నా -> mon``, ``రోజు -> roeju`` and
+        ``ఒక -> ooka``.  A corpus row is therefore never authoritative by itself.
+
+        We accept it only when it is identical to the deterministic phonetic
+        spelling, or when the English phonetic matcher independently chooses the
+        exact same English word.  This keeps useful rows such as
+        ``స్టోరీస్ -> stories`` while rejecting noisy native-word substitutions.
+        """
+        candidate = self.dataset.get(word)
+        if not candidate:
+            return None
+        base = romanize(word, style)
+        if candidate.casefold() == base.casefold():
+            return candidate
+        hit = self.guess(word)
+        if hit and hit[0].casefold() == candidate.casefold():
+            return candidate
+        self.dataset_rejected += 1
+        return None
 
     @lru_cache(maxsize=100_000)
     def guess(self, stem: str) -> tuple[str, float] | None:
@@ -304,19 +334,35 @@ def english_with_suffix(english: str, suffix: str, style: str, sep: str) -> str:
 def convert_word(word: str, style: str, matcher: EnglishMatcher | None, sep: str) -> str:
     if matcher:
         clean = "".join(ch for ch in word if ch not in ZW)
-        if clean in matcher.user:                          # whole-word override
+        if clean in matcher.user:                          # user override always wins
             value = matcher.user[clean]
             return romanize(word, style) if value == "-" else value
-        for suffix in SUFFIXES:                            # dictionary word + ending
-            if suffix and clean.endswith(suffix) and clean[: -len(suffix)] in matcher.user:
-                value = matcher.user[clean[: -len(suffix)]]
+        if clean in matcher.common:                        # vetted built-in spellings
+            value = matcher.common[clean]
+            return romanize(word, style) if value == "-" else value
+        for suffix in SUFFIXES:                            # dictionary/common word + ending
+            if not suffix or not clean.endswith(suffix):
+                continue
+            stem = clean[: -len(suffix)]
+            if stem in matcher.user:
+                value = matcher.user[stem]
                 if value != "-":
                     return english_with_suffix(value, suffix, style, sep)
-        if clean in matcher.dataset:
-            return matcher.dataset[clean]
+            if stem in matcher.common:
+                value = matcher.common[stem]
+                if value != "-":
+                    return english_with_suffix(value, suffix, style, sep)
+        dataset_value = matcher.dataset_choice(clean, style)
+        if dataset_value is not None:
+            return dataset_value
         for stem, suffix in split_loanword(word):
             if stem in matcher.user:
                 value = matcher.user[stem]
+                if value == "-":
+                    break
+                return english_with_suffix(value, suffix, style, sep)
+            if stem in matcher.common:
+                value = matcher.common[stem]
                 if value == "-":
                     break
                 return english_with_suffix(value, suffix, style, sep)
@@ -369,8 +415,10 @@ def main() -> int:
                     help="your corrections: Telugu<TAB>english per line (default: my_words.tsv)")
     ap.add_argument("--words", type=Path, default=HERE / "english_words.txt",
                     help="English word list, most common first (default: english_words.txt)")
+    ap.add_argument("--common", type=Path, default=HERE / "common_words.tsv",
+                    help="vetted Telugu/Tenglish and English-loanword spellings")
     ap.add_argument("--dataset", type=Path, default=HERE / "tenglish_words.tsv",
-                    help="word map built from indiehackers/tenglish_dataset")
+                    help="noisy corpus map; entries are accepted only when independently verified")
     ap.add_argument("--no-english", action="store_true", help="plain letter-by-letter only")
     ap.add_argument("--no-auto", action="store_true", help="use only my_words.tsv, no automatic guessing")
     ap.add_argument("--suffix-sep", default=" ", help="between English word and Telugu ending (default: space → 'phone lo')")
@@ -381,7 +429,7 @@ def main() -> int:
     matcher = None
     if not args.no_english:
         matcher = EnglishMatcher(args.words, args.dict, auto=not args.no_auto,
-                                 dataset=args.dataset)
+                                 dataset=args.dataset, common=args.common)
         if not args.no_auto and not matcher.index:
             print(f"Note: {args.words} not found; only {args.dict.name} corrections are used.", file=sys.stderr)
 

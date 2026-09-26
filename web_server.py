@@ -975,6 +975,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "message": "Story formatter started."}, 202)
                 return
 
+            if route == "/api/start/romanize":
+                command = [sys.executable, str(FORMATTER), "--output", str(OUTPUT_DIR), "--reromanize"]
+                JOBS.start("format", command)
+                self.send_json({
+                    "ok": True,
+                    "message": "Telugu re-romanization started from existing formatted stories.",
+                }, 202)
+                return
+
             if route == "/api/library/recategorize":
                 if not LIBRARY_DB.is_file():
                     raise ValueError("Story library database does not exist yet.")

@@ -359,6 +359,34 @@ cli/parser/content_engine.mjs  existing story extraction engine (per-site select
 telugu_romanizer/              offline Telugu → Tenglish engine
 ```
 
+
+## Telugu → Tenglish romanization (v3.7.3)
+
+Romanization is offline and deterministic. The engine uses this priority order:
+
+1. persistent user corrections in `content_output/romanizer_words.tsv`;
+2. a small reviewed common-loanword map (`telugu_romanizer/common_words.tsv`);
+3. the large `tenglish_words.tsv` corpus only when its spelling is independently verified;
+4. the phonetic Telugu → Latin converter as the safe fallback.
+
+The large corpus is intentionally **not** trusted blindly. It contains real noisy alignments such as `నా → mon`, `రోజు → roeju`, and `ఒక → ooka`; v3.7.3 rejects those and keeps `naa`, `roju`, and `oka`. Common English loanwords written in Telugu script are normalized to familiar spellings, for example `సెక్స్ → sex`, `స్టోరీస్ → stories`, `ఎంజాయ్ → enjoy`, `బాడీ → body`, and `డీసెంట్ → decent`.
+
+To correct an existing library, use **Library → Re-romanize Telugu**. It reads the already verified/formatted story, rewrites only the romanized artifact/database text, and leaves raw and formatted source artifacts unchanged. No re-crawl or re-scrape is required.
+
+To force a preferred spelling, edit the persistent file:
+
+```text
+content_output/romanizer_words.tsv
+```
+
+using one tab-separated mapping per line, for example:
+
+```text
+ఎంజాయ్	enjoy
+బాడీ	body
+```
+
+
 ## Tests
 
 ```bash

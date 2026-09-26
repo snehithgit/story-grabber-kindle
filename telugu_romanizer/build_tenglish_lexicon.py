@@ -3,7 +3,7 @@
 
 Only the 209k-row telugu_asr split is downloaded. Rows whose Telugu and Latin
 word counts align exactly vote on each word spelling; the most frequent
-spelling wins. The resulting TSV is small, deterministic, and used offline.
+spelling wins. The resulting TSV is small and deterministic, but the aligned source is noisy.\nAt runtime its spellings are treated as suggestions and accepted only after\nindependent phonetic verification.
 """
 
 from __future__ import annotations

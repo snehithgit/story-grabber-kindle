@@ -546,11 +546,22 @@ class StoryFormatter:
         self.settings = load_settings()
         self.formatted_dir.mkdir(parents=True, exist_ok=True)
         self.romanized_dir.mkdir(parents=True, exist_ok=True)
+
+        # User corrections must survive Docker/image upgrades, so keep the
+        # editable dictionary under the persistent output volume.  Existing
+        # installations are seeded once from the packaged defaults.
+        self.romanizer_words = output_dir / "romanizer_words.tsv"
+        if not self.romanizer_words.exists():
+            seed = ROMANIZER_DIR / "my_words.tsv"
+            if seed.is_file():
+                atomic_text(self.romanizer_words, seed.read_text("utf-8"))
+
         self.romanizer = EnglishMatcher(
             ROMANIZER_DIR / "english_words.txt",
-            ROMANIZER_DIR / "my_words.tsv",
+            self.romanizer_words,
             auto=True,
             dataset=ROMANIZER_DIR / "tenglish_words.tsv",
+            common=ROMANIZER_DIR / "common_words.tsv",
         )
 
     def _manifest(self) -> dict:
@@ -844,6 +855,74 @@ class StoryFormatter:
         )
         return counts
 
+    def reromanize(self, *, only_url: str | None = None) -> dict[str, int]:
+        """Regenerate romanized artifacts from already-verified formatted HTML.
+
+        This is intentionally independent from crawling and formatting so a
+        romanizer-quality upgrade can be applied to an existing large library
+        without re-scraping pages or changing paragraph structure.
+        """
+        conn = connect_library(self.library_db)
+        counts = {"processed": 0, "failed": 0, "skipped": 0}
+        organized_urls: list[str] = []
+        try:
+            sql = (
+                "SELECT url,title,formatted_file,romanized_file FROM stories "
+                "WHERE telugu=1 AND status IN ('verified','review')"
+            )
+            params: tuple[str, ...] = ()
+            if only_url is not None:
+                sql += " AND url=?"
+                params = (only_url,)
+            sql += " ORDER BY rowid"
+            rows = conn.execute(sql, params).fetchall()
+            total = len(rows)
+            print(f"Romanizer   : {total} Telugu stor(ies) found")
+            for index, row in enumerate(rows, 1):
+                formatted_name = str(row["formatted_file"] or "")
+                if not formatted_name:
+                    counts["skipped"] += 1
+                    print(f"[{index}/{total}] SKIP {row['url']} — no formatted file")
+                    continue
+                formatted_path = self.formatted_dir / formatted_name
+                if not formatted_path.is_file():
+                    counts["failed"] += 1
+                    print(f"[{index}/{total}] FAIL {row['url']} — formatted file missing")
+                    continue
+                try:
+                    formatted_html = formatted_path.read_text("utf-8", errors="strict")
+                    romanized_html = convert_html(formatted_html, "casual", False, self.romanizer, " ")
+                    romanized_name = str(row["romanized_file"] or formatted_name)
+                    romanized_path = self.romanized_dir / romanized_name
+                    atomic_text(romanized_path, romanized_html)
+                    _, roman_blocks = extract_story(romanized_html, formatted_mode=True)
+                    romanized_text = plain_from_blocks(roman_blocks)
+                    conn.execute(
+                        "UPDATE stories SET romanized_file=?, romanized_text=?, romanized=1 WHERE url=?",
+                        (romanized_name, romanized_text, row["url"]),
+                    )
+                    counts["processed"] += 1
+                    organized_urls.append(str(row["url"]))
+                    if counts["processed"] % 100 == 0:
+                        conn.commit()
+                    print(f"[{index}/{total}] OK     {row['url']}")
+                except Exception as exc:
+                    counts["failed"] += 1
+                    print(f"[{index}/{total}] FAIL   {row['url']} — {exc}")
+            conn.commit()
+            if organized_urls:
+                organize_urls(
+                    conn, self.output_dir, self.settings.get("categories", []), organized_urls,
+                    self.settings.get("category_aliases", {}),
+                )
+            print(
+                "Romanizer summary: "
+                f"processed={counts['processed']} failed={counts['failed']} skipped={counts['skipped']}"
+            )
+            return counts
+        finally:
+            conn.close()
+
     def save_manual_format(self, url: str, edited_text: str) -> ProcessResult:
         """Save user-edited paragraph breaks only; changing text is rejected."""
         conn = connect_library(self.library_db)
@@ -926,6 +1005,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Format extracted stories without changing their text")
     parser.add_argument("--output", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--force", action="store_true", help="reprocess even when raw content is unchanged")
+    parser.add_argument("--reromanize", action="store_true",
+                        help="regenerate romanized output from existing formatted stories only")
     parser.add_argument("--url", help="process one exact source URL")
     parser.add_argument(
         "--kindle-min-interval", type=float, default=0.0,
@@ -933,6 +1014,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     formatter = StoryFormatter(args.output.resolve())
+    if args.reromanize:
+        counts = formatter.reromanize(only_url=args.url)
+        return 1 if counts["failed"] and not counts["processed"] else 0
     counts = formatter.run(force=args.force, only_url=args.url, kindle_min_interval=max(0.0, args.kindle_min_interval))
     return 1 if counts["failed"] and not (counts["verified"] or counts["review"] or counts["skipped"]) else 0
 

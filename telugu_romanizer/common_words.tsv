@@ -1,0 +1,21 @@
+# Vetted built-in Telugu -> natural Tenglish / English-loanword spellings.
+# User corrections in content_output/romanizer_words.tsv take priority over these.
+# Keep this list conservative: native Telugu words normally use the deterministic engine.
+ఎంజాయ్	enjoy
+బాడీ	body
+స్టోరీ	story
+స్టొరీ	story
+స్టోరీస్	stories
+స్టొరీస్	stories
+సెక్స్	sex
+సెక్సీ	sexy
+ఫ్యామిలీ	family
+లేడీ	lady
+బేబీ	baby
+డాడీ	daddy
+మమ్మీ	mummy
+వీడియో	video
+ఫోటో	photo
+హీరో	hero
+మూవీ	movie
+పార్టీ	party

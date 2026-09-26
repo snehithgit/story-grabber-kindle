@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.7.3 — Telugu romanization quality
+
+- Fixed the root cause of poor Tenglish output: the large aligned-ASR corpus is now treated as a noisy suggestion source rather than an unconditional override. A corpus spelling is accepted only when it matches deterministic Telugu phonetics or is independently confirmed by the English phonetic matcher.
+- Core words now stay natural and stable (`నా → naa`, `రోజు → roju`, `ఒక → oka`, `తెలుగు → telugu`, `ఈ → ee`, `నేను → nenu`, `పేరు → peru`) instead of noisy forms such as `mon`, `roeju`, `ooka`, `telegu`, `yea`, `neenu`, or `peruu`.
+- Added a small reviewed loanword lexicon for common Telugu-script English words (`సెక్స్ → sex`, `స్టోరీస్ → stories`, `ఎంజాయ్ → enjoy`, `బాడీ → body`, `డీసెంట్ → decent`, `స్టొరీ → story`). User overrides still have highest priority.
+- User romanizer corrections are copied once to persistent `content_output/romanizer_words.tsv`, so custom spellings survive image/container upgrades.
+- Added **Library → Re-romanize Telugu**. It regenerates romanized artifacts from existing formatted stories only; it does not crawl, scrape, or alter the original/formatted story text.
+- Added regression coverage using the reported Telugu sentence and a re-romanization test that proves formatted-source bytes stay unchanged.
+- The external-library evaluation favored keeping the existing lightweight deterministic engine instead of adding a Torch/Fairseq model or a broad transliteration framework: the local engine already produces the correct native Telugu phonetics, and the defect was the noisy override corpus.
+- Test suite: 106 tests passing.
+
 ## v3.7.2 — Merged hardening release
 
 - Keeps all v3.7.1 correctness/recovery fixes, including serialized maintenance/job startup, byte-safe journal sync, retry/checkpoint de-duplication, multipart category aliases, partial-backup cleanup, WAL-safe rollback copies, duplicate-scan coverage reporting, and accurate bulk/link counts.
