@@ -13,7 +13,7 @@ import re
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 from kindle_export import write_kindle_manifest
 
@@ -89,19 +89,66 @@ def normalize_categories(values: Iterable[object]) -> list[str]:
     return result[:200]
 
 
-def _category_in_text(categories: Iterable[str], text: str) -> str | None:
-    """Return the first configured category found in one text field."""
+def normalize_category_aliases(values: object, categories: Iterable[str] = ()) -> dict[str, list[str]]:
+    """Normalize canonical-category -> alias mappings.
+
+    Canonical category names are matched case-insensitively against the configured
+    category list, so ``thammudu`` and ``Thammudu`` refer to the same category.
+    Unknown canonical keys are ignored: aliases never create a new category by
+    themselves.
+    """
+    canonical = normalize_categories(categories)
+    canonical_by_key = {name.casefold(): name for name in canonical}
+    result: dict[str, list[str]] = {name: [] for name in canonical}
+
+    if isinstance(values, Mapping):
+        items = values.items()
+    elif isinstance(values, list):
+        # Also accept [{"category": "X", "aliases": [...]}, ...] for forwards compatibility.
+        items = []
+        for item in values:
+            if isinstance(item, Mapping):
+                items.append((item.get("category", ""), item.get("aliases", [])))
+    else:
+        items = []
+
+    for raw_name, raw_aliases in items:
+        name = canonical_by_key.get(MULTISPACE.sub(" ", str(raw_name or "")).strip().casefold())
+        if not name:
+            continue
+        if isinstance(raw_aliases, str):
+            raw_aliases = re.split(r"[,|]", raw_aliases)
+        if not isinstance(raw_aliases, Iterable):
+            continue
+        seen = {name.casefold()}
+        aliases: list[str] = []
+        for raw_alias in raw_aliases:
+            alias = MULTISPACE.sub(" ", str(raw_alias or "")).strip()
+            key = alias.casefold()
+            if alias and key not in seen:
+                seen.add(key)
+                aliases.append(alias)
+        result[name] = aliases[:50]
+    return {name: aliases for name, aliases in result.items() if aliases}
+
+
+def _category_in_text(categories: Iterable[str], text: str, category_aliases: object = None) -> str | None:
+    """Return the first canonical category whose name or alias is found in text."""
+    configured = normalize_categories(categories)
+    aliases = normalize_category_aliases(category_aliases or {}, configured)
     haystack = str(text or "").casefold()
-    for category in normalize_categories(categories):
-        needle = category.casefold()
-        # Phrase boundary that works for both normal words and punctuation-heavy names.
-        pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
-        if re.search(pattern, haystack, re.IGNORECASE):
-            return category
+    for category in configured:
+        terms = [category] + aliases.get(category, [])
+        for term in terms:
+            needle = term.casefold()
+            # Phrase boundary that works for both normal words and punctuation-heavy names.
+            pattern = rf"(?<!\w){re.escape(needle)}(?!\w)"
+            if re.search(pattern, haystack, re.IGNORECASE):
+                return category
     return None
 
 
-def match_category_with_source(categories: Iterable[str], title: str, *story_texts: str) -> tuple[str, str]:
+def match_category_with_source(categories: Iterable[str], title: str, *story_texts: str, category_aliases: object = None) -> tuple[str, str]:
     """Categorize with strict priority: title first, story content second.
 
     The category list order is respected within each phase.  A category found
@@ -109,20 +156,20 @@ def match_category_with_source(categories: Iterable[str], title: str, *story_tex
     Only when the title contains no configured category do we inspect story
     content.
     """
-    title_match = _category_in_text(categories, title)
+    title_match = _category_in_text(categories, title, category_aliases)
     if title_match:
         return title_match, "title"
 
     body = "\n".join(str(text or "") for text in story_texts)
-    body_match = _category_in_text(categories, body)
+    body_match = _category_in_text(categories, body, category_aliases)
     if body_match:
         return body_match, "content"
     return "Uncategorized", "none"
 
 
-def match_category(categories: Iterable[str], title: str, *story_texts: str) -> str:
-    """Return category using title-first, content-second matching."""
-    return match_category_with_source(categories, title, *story_texts)[0]
+def match_category(categories: Iterable[str], title: str, *story_texts: str, category_aliases: object = None) -> str:
+    """Return canonical category using title-first, content-second matching."""
+    return match_category_with_source(categories, title, *story_texts, category_aliases=category_aliases)[0]
 
 
 def ensure_story_columns(conn: sqlite3.Connection) -> None:
@@ -131,8 +178,12 @@ def ensure_story_columns(conn: sqlite3.Connection) -> None:
         "series_title": "TEXT NOT NULL DEFAULT ''",
         "part_number": "INTEGER",
         "category": "TEXT NOT NULL DEFAULT 'Uncategorized'",
+        "category_source": "TEXT NOT NULL DEFAULT 'none'",
+        "category_locked": "INTEGER NOT NULL DEFAULT 0",
         "organized_file": "TEXT NOT NULL DEFAULT ''",
         "added_at": "TEXT NOT NULL DEFAULT ''",
+        "source_changed": "INTEGER NOT NULL DEFAULT 0",
+        "previous_raw_sha256": "TEXT NOT NULL DEFAULT ''",
     }
     for name, declaration in additions.items():
         if name not in existing:
@@ -156,7 +207,7 @@ def _preferred_source(row: sqlite3.Row, output_dir: Path) -> Path | None:
     return None
 
 
-def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iterable[str]) -> dict[str, int]:
+def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iterable[str], category_aliases: object = None) -> dict[str, int]:
     """Rebuild the disposable human-readable library tree from the database."""
     ensure_story_columns(conn)
     library_dir = output_dir / "library"
@@ -169,25 +220,33 @@ def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iter
     prepared: list[dict[str, object]] = []
     for row in rows:
         series_title, part_number = parse_story_part(row["title"])
-        category, category_source = match_category_with_source(
-            categories,
-            row["title"],
-            row["original_text"],
-            row["formatted_text"],
-            row["romanized_text"],
-        )
+        if row["category_locked"]:
+            # A bulk category edit pinned this story; never let a rebuild
+            # (recategorize, settings-alias edit, first-launch migration)
+            # silently move it back to an automatic match.
+            category, category_source = row["category"], "manual"
+        else:
+            category, category_source = match_category_with_source(
+                categories,
+                row["title"],
+                row["original_text"],
+                row["formatted_text"],
+                row["romanized_text"],
+                category_aliases=category_aliases,
+            )
         prepared.append({
             "row": row, "series": series_title, "part": part_number,
             "category": category, "category_source": category_source,
         })
 
     # Multipart stories stay in one category.  A title match in ANY part wins
-    # over every content-only match in the series.  Within the same phase, the
-    # configured category order remains deterministic.
+    # over every content-only match in the series, and a manually locked part
+    # always wins outright. Within the same phase, the configured category
+    # order remains deterministic.
     configured = normalize_categories(categories)
     order = {name.casefold(): index for index, name in enumerate(configured)}
-    source_rank = {"title": 0, "content": 1, "none": 2}
-    series_best: dict[str, tuple[tuple[int, int], str]] = {}
+    source_rank = {"manual": -1, "title": 0, "content": 1, "none": 2}
+    series_best: dict[str, tuple[tuple[int, int], str, str]] = {}
     for item in prepared:
         if item["part"] is None:
             continue
@@ -197,22 +256,26 @@ def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iter
         rank = (source_rank.get(scope, 2), order.get(candidate.casefold(), 10**9))
         current = series_best.get(key)
         if current is None or rank < current[0]:
-            series_best[key] = (rank, candidate)
-    series_categories = {key: value[1] for key, value in series_best.items()}
+            series_best[key] = (rank, candidate, scope)
+    series_categories = {key: (value[1], value[2]) for key, value in series_best.items()}
 
     copied = 0
     groups: set[str] = set()
-    updates: list[tuple[str, int | None, str, str, str]] = []
+    updates: list[tuple[str, int | None, str, str, int, str, str]] = []
     used_paths: set[str] = set()
     for item in prepared:
         row = item["row"]
         assert isinstance(row, sqlite3.Row)
         series = str(item["series"])
         part = item["part"] if isinstance(item["part"], int) else None
-        category = series_categories.get(series.casefold(), str(item["category"])) if part is not None else str(item["category"])
+        if part is not None:
+            category, category_source = series_categories.get(series.casefold(), (str(item["category"]), str(item["category_source"])))
+        else:
+            category, category_source = str(item["category"]), str(item["category_source"])
+        locked = 1 if category_source == "manual" else 0
         source = _preferred_source(row, output_dir)
         if source is None:
-            updates.append((series, part, category, "", row["url"]))
+            updates.append((series, part, category, category_source, locked, "", row["url"]))
             continue
 
         category_dir = temp_dir / clean_component(category, "Uncategorized")
@@ -233,7 +296,7 @@ def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iter
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         copied += 1
-        updates.append((series, part, category, str(target.relative_to(temp_dir)), row["url"]))
+        updates.append((series, part, category, category_source, locked, str(target.relative_to(temp_dir)), row["url"]))
 
     # Replace only the generated library view, never raw processing artifacts.
     if library_dir.exists():
@@ -241,11 +304,13 @@ def rebuild_library(conn: sqlite3.Connection, output_dir: Path, categories: Iter
     temp_dir.replace(library_dir)
 
     conn.executemany(
-        "UPDATE stories SET series_title=?,part_number=?,category=?,organized_file=? WHERE url=?",
+        "UPDATE stories SET series_title=?,part_number=?,category=?,category_source=?,category_locked=?,organized_file=? WHERE url=?",
         updates,
     )
     conn.commit()
-    kindle = write_kindle_manifest(conn, output_dir)
+    # An explicit rebuild (recategorize, settings change, first-launch
+    # migration) always writes immediately -- force=True bypasses debounce.
+    kindle = write_kindle_manifest(conn, output_dir, force=True)
     return {"stories": copied, "multipart_groups": len(groups), **kindle}
 
 
@@ -269,12 +334,21 @@ def _remove_organized_file(output_dir: Path, relative: str) -> None:
         parent = parent.parent
 
 
-def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterable[str], urls: Iterable[str]) -> dict[str, int]:
-    """Incrementally organize changed stories and their multipart siblings."""
+def organize_urls(
+    conn: sqlite3.Connection, output_dir: Path, categories: Iterable[str], urls: Iterable[str],
+    category_aliases: object = None, *, kindle_min_interval: float = 0.0,
+) -> dict[str, int]:
+    """Incrementally organize changed stories and their multipart siblings.
+
+    ``kindle_min_interval`` is 0 (always write immediately) unless a caller
+    that runs this in a tight per-item loop -- auto_scrape.py with a very
+    small batch size -- opts into debouncing the library.json rewrite; see
+    kindle_export.write_kindle_manifest.
+    """
     ensure_story_columns(conn)
     wanted = [str(url) for url in dict.fromkeys(urls) if str(url)]
     if not wanted:
-        kindle = write_kindle_manifest(conn, output_dir)
+        kindle = write_kindle_manifest(conn, output_dir, min_interval=kindle_min_interval)
         return {"stories": 0, "multipart_groups": 0, **kindle}
 
     placeholders = ",".join("?" for _ in wanted)
@@ -283,11 +357,19 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
     single_urls: set[str] = set()
     for row in changed:
         series, part = parse_story_part(row["title"])
-        category = match_category(categories, row["title"], row["original_text"], row["formatted_text"], row["romanized_text"])
-        conn.execute(
-            "UPDATE stories SET series_title=?,part_number=?,category=? WHERE url=?",
-            (series, part, category, row["url"]),
-        )
+        if row["category_locked"]:
+            # A bulk category edit (bulk_set_category) pinned this story;
+            # leave its category alone, only refresh series/part placement.
+            conn.execute("UPDATE stories SET series_title=?,part_number=? WHERE url=?", (series, part, row["url"]))
+        else:
+            category, category_source = match_category_with_source(
+                categories, row["title"], row["original_text"], row["formatted_text"], row["romanized_text"],
+                category_aliases=category_aliases,
+            )
+            conn.execute(
+                "UPDATE stories SET series_title=?,part_number=?,category=?,category_source=? WHERE url=?",
+                (series, part, category, category_source, row["url"]),
+            )
         if part is None:
             single_urls.add(row["url"])
         else:
@@ -305,21 +387,35 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
         ).fetchall()
         if not siblings:
             continue
-        ranked = []
-        for sibling in siblings:
-            category, scope = match_category_with_source(
-                configured,
-                sibling["title"],
-                sibling["original_text"],
-                sibling["formatted_text"],
-                sibling["romanized_text"],
+        locked_sibling = next((s for s in siblings if s["category_locked"]), None)
+        if locked_sibling is not None:
+            # One part of this series was manually pinned (bulk_set_category)
+            # -- the whole series follows it, and the lock spreads to every
+            # sibling so a future scrape of another part doesn't drift away.
+            group_category, group_category_source = locked_sibling["category"], "manual"
+            conn.execute(
+                "UPDATE stories SET category=?,category_source=?,category_locked=1 "
+                "WHERE part_number IS NOT NULL AND lower(series_title)=?",
+                (group_category, group_category_source, series_key),
             )
-            ranked.append(((source_rank.get(scope, 2), order.get(category.casefold(), 10**9)), category))
-        group_category = min(ranked, key=lambda item: item[0])[1]
-        conn.execute(
-            "UPDATE stories SET category=? WHERE part_number IS NOT NULL AND lower(series_title)=?",
-            (group_category, series_key),
-        )
+        else:
+            ranked = []
+            for sibling in siblings:
+                category, scope = match_category_with_source(
+                    configured,
+                    sibling["title"],
+                    sibling["original_text"],
+                    sibling["formatted_text"],
+                    sibling["romanized_text"],
+                    category_aliases=category_aliases,
+                )
+                ranked.append(((source_rank.get(scope, 2), order.get(category.casefold(), 10**9)), category, scope))
+            best = min(ranked, key=lambda item: item[0])
+            group_category, group_category_source = best[1], best[2]
+            conn.execute(
+                "UPDATE stories SET category=?,category_source=? WHERE part_number IS NOT NULL AND lower(series_title)=?",
+                (group_category, group_category_source, series_key),
+            )
         for row in siblings:
             targets[row["url"]] = row
     if single_urls:
@@ -336,6 +432,20 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
     else:
         rows = []
 
+    copied = _place_rows(conn, output_dir, rows)
+    conn.commit()
+    kindle = write_kindle_manifest(conn, output_dir, min_interval=kindle_min_interval)
+    return {"stories": copied, "multipart_groups": len(affected_series), **kindle}
+
+
+def _place_rows(conn: sqlite3.Connection, output_dir: Path, rows: Iterable[sqlite3.Row]) -> int:
+    """Copy each row's preferred source file into its category/series folder.
+
+    Shared by :func:`organize_urls` and :func:`bulk_set_category` -- both end
+    up needing "these specific rows' category/series just changed, put their
+    files where they now belong" without touching anything else in the
+    library tree.
+    """
     library_dir = output_dir / "library"
     library_dir.mkdir(parents=True, exist_ok=True)
     copied = 0
@@ -360,6 +470,96 @@ def organize_urls(conn: sqlite3.Connection, output_dir: Path, categories: Iterab
         shutil.copy2(source, target)
         conn.execute("UPDATE stories SET organized_file=? WHERE url=?", (relative, row["url"]))
         copied += 1
+    return copied
+
+
+def bulk_set_category(
+    conn: sqlite3.Connection, output_dir: Path, urls: Iterable[str], category: str,
+) -> dict[str, int]:
+    """v3.5 bulk category editor: force a category onto specific stories.
+
+    Any multipart series touched is expanded to include every sibling part
+    (a series always lives in one category folder) and the whole group is
+    marked ``category_locked`` so a later recategorize/settings-alias-edit
+    pass leaves the manual choice alone -- see :func:`organize_urls` and
+    :func:`rebuild_library`, which both check the flag before recomputing a
+    row's category. Use :func:`bulk_unlock_category` to hand a story back to
+    automatic title/content matching.
+    """
+    ensure_story_columns(conn)
+    category = clean_component(category, "Uncategorized") if category.strip() else "Uncategorized"
+    wanted = [str(url) for url in dict.fromkeys(urls) if str(url)]
+    if not wanted:
+        return {"stories": 0}
+
+    placeholders = ",".join("?" for _ in wanted)
+    rows = conn.execute(f"SELECT url, series_title, part_number FROM stories WHERE url IN ({placeholders})", wanted).fetchall()
+    expanded: set[str] = set(wanted)
+    series_keys = {row["series_title"].casefold() for row in rows if row["part_number"] is not None and row["series_title"]}
+    if series_keys:
+        placeholders2 = ",".join("?" for _ in series_keys)
+        for row in conn.execute(f"SELECT url FROM stories WHERE lower(series_title) IN ({placeholders2})", list(series_keys)):
+            expanded.add(row["url"])
+
+    placeholders3 = ",".join("?" for _ in expanded)
+    conn.execute(
+        f"UPDATE stories SET category=?, category_source='manual', category_locked=1 WHERE url IN ({placeholders3})",
+        [category, *expanded],
+    )
     conn.commit()
-    kindle = write_kindle_manifest(conn, output_dir)
-    return {"stories": copied, "multipart_groups": len(affected_series), **kindle}
+
+    changed_rows = conn.execute(
+        f"SELECT * FROM stories WHERE url IN ({placeholders3}) AND status IN ('verified','review')", list(expanded)
+    ).fetchall()
+    copied = _place_rows(conn, output_dir, changed_rows)
+    conn.commit()
+    kindle = write_kindle_manifest(conn, output_dir, force=True)
+    return {"stories": copied, "affected": len(expanded), **kindle}
+
+
+def bulk_unlock_category(
+    conn: sqlite3.Connection, output_dir: Path, urls: Iterable[str], categories: Iterable[str],
+    category_aliases: object = None,
+) -> dict[str, int]:
+    """Undo :func:`bulk_set_category`: release the lock and recompute normally."""
+    ensure_story_columns(conn)
+    wanted = [str(url) for url in dict.fromkeys(urls) if str(url)]
+    if not wanted:
+        return {"stories": 0}
+    rows = conn.execute(
+        f"SELECT url, series_title, part_number FROM stories WHERE url IN ({','.join('?' for _ in wanted)})", wanted
+    ).fetchall()
+    expanded: set[str] = set(wanted)
+    series_keys = {row["series_title"].casefold() for row in rows if row["part_number"] is not None and row["series_title"]}
+    if series_keys:
+        placeholders2 = ",".join("?" for _ in series_keys)
+        for row in conn.execute(f"SELECT url FROM stories WHERE lower(series_title) IN ({placeholders2})", list(series_keys)):
+            expanded.add(row["url"])
+    placeholders3 = ",".join("?" for _ in expanded)
+    conn.execute(f"UPDATE stories SET category_locked=0 WHERE url IN ({placeholders3})", list(expanded))
+    conn.commit()
+    return organize_urls(conn, output_dir, categories, expanded, category_aliases)
+
+
+def list_series(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """v3.5 series manager: every multipart series with its parts and gaps."""
+    ensure_story_columns(conn)
+    rows = conn.execute(
+        "SELECT url, title, series_title, part_number, category, status, organized_file FROM stories "
+        "WHERE part_number IS NOT NULL ORDER BY series_title COLLATE NOCASE, part_number"
+    ).fetchall()
+    groups: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row["series_title"].casefold()
+        group = groups.setdefault(key, {"series_title": row["series_title"], "category": row["category"], "parts": []})
+        group["parts"].append({
+            "url": row["url"], "title": row["title"], "part_number": row["part_number"],
+            "status": row["status"], "organized_file": row["organized_file"],
+        })
+    result = []
+    for group in groups.values():
+        numbers = sorted(p["part_number"] for p in group["parts"])
+        missing = [n for n in range(1, numbers[-1]) if n not in numbers] if numbers else []
+        result.append({**group, "part_count": len(numbers), "missing_parts": missing})
+    result.sort(key=lambda g: str(g["series_title"]).casefold())
+    return result

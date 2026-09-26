@@ -38,7 +38,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import OpenerDirector, build_opener
 from urllib.robotparser import RobotFileParser
 
@@ -52,6 +52,18 @@ SKIPPED_EXTENSIONS = {
     ".ogg", ".ogv", ".otf", ".pdf", ".png", ".ppt", ".pptx", ".rar",
     ".rss", ".svg", ".tar", ".tgz", ".tif", ".tiff", ".ttf", ".wav",
     ".webm", ".webp", ".woff", ".woff2", ".xls", ".xlsx", ".xml", ".zip",
+}
+
+# v3.7: mirrors links_store.TRACKING_PARAMS exactly. A URL the crawler
+# already deduped during a crawl must normalize the same way once it lands
+# in the SQLite ``links`` table (see links_store.normalize_url) -- two
+# independent tracking-param lists would silently let near-duplicate pages
+# (same story, different utm_source) through one layer and not the other.
+TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "utm_reader", "gclid", "fbclid", "msclkid",
+    "mc_cid", "mc_eid", "ref", "ref_src", "refsrc", "igshid", "spm", "_ga",
+    "yclid", "vero_id",
 }
 
 
@@ -93,7 +105,14 @@ def positive_float(value: str) -> float:
 
 
 def normalize_url(url: str, *, add_scheme: bool = False) -> str:
-    """Return a canonical HTTP(S) URL without a fragment."""
+    """Return a canonical HTTP(S) URL without a fragment.
+
+    Also strips known tracking parameters (utm_*, gclid, fbclid, ref, ...)
+    and sorts whatever query parameters remain, so ``/story?id=1&utm_source=x``
+    and ``/story?utm_source=y&id=1`` collapse to the same crawl-queue entry
+    instead of being fetched, extracted, and stored twice as "different"
+    pages.
+    """
     value = url.strip()
     if add_scheme and "://" not in value:
         value = "https://" + value
@@ -118,7 +137,13 @@ def normalize_url(url: str, *, add_scheme: bool = False) -> str:
     if not normalized_path.startswith("/"):
         normalized_path = "/" + normalized_path
 
-    return urlunsplit((scheme, netloc, normalized_path, parts.query, ""))
+    query_pairs = sorted(
+        (key, qvalue) for key, qvalue in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() not in TRACKING_PARAMS
+    )
+    query = urlencode(query_pairs)
+
+    return urlunsplit((scheme, netloc, normalized_path, query, ""))
 
 
 def is_internal(url: str, main_host: str, include_subdomains: bool) -> bool:
@@ -697,14 +722,19 @@ def crawl_site(
     use_sitemaps: bool = True,
     max_sitemaps: int = 200,
     max_sitemap_urls: int = 250000,
+    site_profiles: dict[str, float] | None = None,
     journal: SiteJournal | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
     if journal and journal.finished is not None:
         print(f"  already finished in an earlier run: {main_site}")
         return journal.finished
+    site_profiles = site_profiles or {}
     opener = make_opener(user_agent)
     main_host = (urlsplit(main_site).hostname or "").lower()
+    # v3.7: a per-host floor on top of --delay/robots.txt, for sites that
+    # need to be crawled more gently than the rest (settings.site_profiles).
+    base_delay = max(delay, float(site_profiles.get(main_host, 0.0)))
     if respect_robots or use_sitemaps:
         robots_parser, robots_sitemaps = get_robots(opener, main_site, timeout)
     else:
@@ -799,7 +829,7 @@ def crawl_site(
             main_site,
             robots_sitemaps,
             timeout=timeout,
-            delay=delay,
+            delay=base_delay,
             max_sitemaps=max_sitemaps,
             max_urls=min(max_sitemap_urls, max_pages),
             include_subdomains=include_subdomains,
@@ -835,7 +865,8 @@ def crawl_site(
         if robots and not robots.can_fetch(user_agent, requested_url):
             log({"t": "v", "u": requested_url, "s": "skip"})
             continue
-        effective_delay = delay
+        request_host = (urlsplit(requested_url).hostname or "").lower()
+        effective_delay = max(delay, float(site_profiles.get(request_host, 0.0)))
         if robots:
             robots_delay = robots.crawl_delay(user_agent) or robots.crawl_delay("*") or 0
             effective_delay = max(effective_delay, float(robots_delay))
@@ -1003,7 +1034,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--user-agent", default="StoryGrabberCrawler/2.0",
         help="HTTP user-agent name (default: StoryGrabberCrawler/2.0)",
     )
+    parser.add_argument(
+        "--site-profiles", default="",
+        help='JSON object mapping host -> minimum delay in seconds, e.g. \'{"slow.example.com": 3.0}\'. '
+             "Acts as a floor on top of --delay and robots.txt crawl-delay for that host only (default: none)",
+    )
     return parser
+
+
+def parse_site_profiles(raw: str) -> dict[str, float]:
+    """Parse --site-profiles' JSON. Malformed input is ignored rather than
+    fatal -- a rate-limit hint should never be able to abort a crawl."""
+    if not raw or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"  ignoring --site-profiles (invalid JSON): {raw!r}", file=sys.stderr)
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    result: dict[str, float] = {}
+    for host, seconds in parsed.items():
+        try:
+            result[str(host).strip().lower()] = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def journal_dir_for(output: Path) -> Path:
@@ -1031,6 +1088,7 @@ def main() -> int:
     journal_dir = journal_dir_for(args.output)
     try:
         sites = load_sites(args.sites_file)
+        site_profiles = parse_site_profiles(args.site_profiles)
         if args.fresh and journal_dir.exists():
             shutil.rmtree(journal_dir)
             print("Starting fresh: discarded saved progress.")
@@ -1076,6 +1134,7 @@ def main() -> int:
                     use_sitemaps=not args.no_sitemaps,
                     max_sitemaps=args.max_sitemaps,
                     max_sitemap_urls=args.max_sitemap_urls,
+                    site_profiles=site_profiles,
                     journal=journal,
                     on_progress=on_progress,
                 )

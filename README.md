@@ -1,8 +1,15 @@
-# Story Grabber v3.3.2
-
-# Story Grabber v3.3.1
+# Story Grabber v3.7.2
 
 A local-first web application for crawling story sites, extracting story text, fixing readability without changing the wording, romanizing Telugu, grouping multipart stories, and organizing the result into a simple local library.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full v3.4–v3.7.2 release notes (performance, library quality, reliability, and site intelligence). In short:
+
+- **v3.4 Performance** — links and search moved into SQLite (FTS5), indexed dashboard counters, adaptive polling, debounced Kindle export.
+- **v3.5 Library quality** — duplicate detection, category confidence + locking, series manager, bulk category operations.
+- **v3.6 Reliability** — integrity checker, safe repair, backups/restore, persistent job history, transient/permanent retry classification, source-change detection on re-scrape.
+- **v3.7 Site intelligence** — tracking-param-aware URL normalization at crawl time, per-site crawl-delay profiles.
+
+Per-site CSS-selector extraction and cross-page pagination stitching (both inside the Node.js `cli/parser/content_engine.mjs` engine) were intentionally left out of this pass — see the "Deferred" section of the changelog.
 
 Native launches bind only to `127.0.0.1` by default. Docker starts Story Grabber with explicit private-LAN mode so the same web app can be opened from phones/tablets on your LAN while public-host and cross-origin requests remain blocked.
 
@@ -333,16 +340,22 @@ An older v2 SQLite library is migrated automatically on first v3 server start. N
 ## Important source files
 
 ```text
-web_server.py                  local HTTP API, job control, library queries
+web_server.py                  local HTTP API, job control, library queries, maintenance routes
 auto_scrape.py                 incremental Auto crawl + scrape coordinator
 story_pipeline.py              one shared raw extraction → formatting pipeline
-story_formatter.py             readability formatter + exact verifier + romanizer
-story_organizer.py             Part N grouping, category matching, folder organization
-web/index.html                 four-page KISS frontend
+story_formatter.py             readability formatter + exact verifier + romanizer + source-change detection
+story_organizer.py             Part N grouping, category matching, folder organization, bulk ops, series manager
+db_migrations.py               single schema authority (PRAGMA user_version-tracked migrations, incl. FTS5)
+links_store.py                 crawler links kept in SQLite (URL normalization, diff-import from JSON/journal)
+job_store.py                   persistent job-run history + transient/permanent failure classification
+duplicate_detector.py          exact/title/fuzzy duplicate detection
+kindle_export.py               Kindle library.json/changes.json export, debounced across small batches
+maintenance.py                 integrity check, repair, backup/restore, analyze/vacuum, storage health
+web/index.html                 KISS frontend (Dashboard/Sources/Library/Settings incl. Maintenance panel)
 web/app.js                     frontend routing/API behavior
 web/app.css                    compact responsive UI
-cli/site_crawler.py            resumable crawler with partial result saves
-cli/parser/content_engine.mjs  existing story extraction engine
+cli/site_crawler.py            resumable crawler with partial result saves, per-site delay profiles
+cli/parser/content_engine.mjs  existing story extraction engine (per-site selectors/pagination: out of scope, see CHANGELOG)
 telugu_romanizer/              offline Telugu → Tenglish engine
 ```
 
@@ -352,17 +365,26 @@ telugu_romanizer/              offline Telugu → Tenglish engine
 python -m unittest discover -s tests -v
 ```
 
-The suite covers:
+The suite covers, among other things:
 
 - run-on dialogue separation,
 - exact serialized-text fidelity,
 - rejection of wording changes in manual formatting,
 - `Part N` / `Pt. N` and bare `Story Name N` detection,
 - conservative rejection of unrelated `Chapter N` grouping,
-- category precedence,
+- category precedence, category source/locking, bulk category operations,
 - multipart parts staying in one category folder,
 - partial crawler-output detection for Auto mode,
-- scraper progress-state detection.
+- scraper progress-state detection,
+- database migrations (fresh DB, upgrade-in-place, idempotency),
+- links/FTS sync from JSON and the crash journal,
+- Kindle export debounce and change-tracking,
+- duplicate detection (exact/title/fuzzy),
+- maintenance: integrity check, repair, backup/restore, storage health,
+- job history persistence and transient/permanent retry classification,
+- source-change detection on re-scrape,
+- crawler URL normalization and per-site delay profiles,
+- real HTTP requests against the running server for the newer endpoints.
 
 ## Design constraints
 
@@ -376,7 +398,7 @@ The v3 changes intentionally follow KISS/DRY/SOLID/YAGNI principles:
 - auto organization is incremental, so a large library is not recopied after every scrape batch.
 
 
-## v3.3.2 category priority
+## v3.3.3 category priority
 
 Category assignment is deterministic and two-stage:
 
@@ -385,3 +407,8 @@ Category assignment is deterministic and two-stage:
 3. If nothing matches, use `Uncategorized`.
 
 The Library page includes **Re-categorize Library**. It reapplies this rule to all existing verified/review stories, rebuilds only `content_output/library/`, moves multipart groups together, and regenerates Kindle `library.json`. Raw, formatted and romanized source artifacts are not modified.
+
+
+## Category aliases (v3.3.3)
+
+Keep one canonical category folder while matching spelling variants. In Settings → Categories, keep the canonical name in **Category names**, then add aliases using `Canonical = alias1, alias2`. Example: `Thammudu = thammudu, tammudu, thamudu`. Matching remains title-first; only when no canonical name or alias is present in the title does the engine inspect story content. Use **Library → Re-categorize Library** to apply the rule to existing stories.

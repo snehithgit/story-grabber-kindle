@@ -21,6 +21,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--browser-mode", choices=["background", "headless", "visible"], default="background")
+    ap.add_argument(
+        "--kindle-min-interval", type=float, default=0.0,
+        help="forwarded to story_formatter.py; debounces library.json rewrites across rapid successive batches",
+    )
     args = ap.parse_args()
 
     command = [
@@ -48,6 +52,8 @@ def main() -> int:
     format_command = [sys.executable, str(FORMATTER), "--output", str(args.output)]
     if args.force:
         format_command.append("--force")
+    if args.kindle_min_interval > 0:
+        format_command.extend(["--kindle-min-interval", str(args.kindle_min_interval)])
     return subprocess.call(format_command, cwd=ROOT)
 
 

@@ -32,6 +32,19 @@ class StoryOrganizerTests(unittest.TestCase):
         )
         self.assertEqual(match_category(["Romance"], "Unrelated title", "Unrelated text"), "Uncategorized")
 
+    def test_category_aliases_resolve_to_one_canonical_folder(self):
+        aliases = {"Thammudu": ["tammudu", "thamudu"]}
+        self.assertEqual(match_category(["Thammudu"], "Tammudu story", "", category_aliases=aliases), "Thammudu")
+        self.assertEqual(match_category(["Thammudu"], "Thamudu story", "", category_aliases=aliases), "Thammudu")
+        self.assertEqual(match_category(["Thammudu"], "Other title", "my thammudu came home", category_aliases=aliases), "Thammudu")
+
+    def test_title_alias_beats_body_category(self):
+        aliases = {"Thammudu": ["tammudu", "thamudu"]}
+        self.assertEqual(
+            match_category(["College", "Thammudu"], "Tammudu Story", "College appears in body", category_aliases=aliases),
+            "Thammudu",
+        )
+
     def test_multipart_parts_share_category_folder(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -101,6 +114,44 @@ class StoryOrganizerTests(unittest.TestCase):
             self.assertEqual([row["category"] for row in rows], ["Family", "Family"])
             self.assertTrue((root / "library" / "Family" / "Family Moon" / "Part 001.html").is_file())
             self.assertTrue((root / "library" / "Family" / "Family Moon" / "Part 002.html").is_file())
+            conn.close()
+
+    def test_incremental_multipart_alias_keeps_one_canonical_category(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "romanized_pages").mkdir()
+            (root / "romanized_pages" / "p1.html").write_text("part one", encoding="utf-8")
+            (root / "romanized_pages" / "p2.html").write_text("part two", encoding="utf-8")
+            conn = sqlite3.connect(root / "story_library.sqlite3")
+            conn.row_factory = sqlite3.Row
+            conn.execute("""
+                CREATE TABLE stories (
+                    url TEXT PRIMARY KEY,title TEXT NOT NULL,source_host TEXT NOT NULL DEFAULT '',words INTEGER NOT NULL DEFAULT 0,
+                    raw_file TEXT NOT NULL DEFAULT '',formatted_file TEXT NOT NULL DEFAULT '',romanized_file TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'verified',integrity_exact INTEGER NOT NULL DEFAULT 1,telugu INTEGER NOT NULL DEFAULT 0,
+                    romanized INTEGER NOT NULL DEFAULT 1,paragraphs INTEGER NOT NULL DEFAULT 0,dialogue_breaks INTEGER NOT NULL DEFAULT 0,
+                    review_reason TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '',raw_sha256 TEXT NOT NULL DEFAULT '',
+                    original_text TEXT NOT NULL DEFAULT '',formatted_text TEXT NOT NULL DEFAULT '',romanized_text TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT '',manual_accept INTEGER NOT NULL DEFAULT 0
+                )
+            """)
+            ensure_story_columns(conn)
+            conn.executemany(
+                "INSERT INTO stories(url,title,romanized_file,original_text,romanized_text) VALUES(?,?,?,?,?)",
+                [
+                    ("https://x/1", "Tammudu Love Part 1", "p1.html", "", ""),
+                    ("https://x/2", "Tammudu Love Part 2", "p2.html", "", ""),
+                ],
+            )
+            conn.commit()
+            organize_urls(
+                conn, root, ["Thammudu"], ["https://x/1", "https://x/2"],
+                {"Thammudu": ["tammudu", "thamudu"]},
+            )
+            rows = conn.execute("SELECT category FROM stories ORDER BY part_number").fetchall()
+            self.assertEqual([row["category"] for row in rows], ["Thammudu", "Thammudu"])
+            self.assertTrue((root / "library" / "Thammudu" / "Tammudu Love" / "Part 001.html").is_file())
+            self.assertTrue((root / "library" / "Thammudu" / "Tammudu Love" / "Part 002.html").is_file())
             conn.close()
 
     def test_bare_number_parts_share_series_folder(self):

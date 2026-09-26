@@ -40,6 +40,7 @@ ROMANIZER_DIR = ROOT / "telugu_romanizer"
 sys.path.insert(0, str(ROMANIZER_DIR))
 from telugu_romanize import EnglishMatcher, convert_html  # noqa: E402
 from story_organizer import ensure_story_columns, organize_urls, rebuild_library  # noqa: E402
+import db_migrations  # noqa: E402
 
 TELUGU_RE = re.compile(r"[\u0C00-\u0C7F]")
 SPACE_RE = re.compile(r"\s+")
@@ -495,58 +496,20 @@ def load_settings() -> dict:
 
 
 def connect_library(path: Path = LIBRARY_DB) -> sqlite3.Connection:
+    """Open (creating if needed) the story library DB, fully migrated.
+
+    Schema ownership lives in ``db_migrations.py``: every table/column this
+    app has ever needed — stories, links, FTS5 search, job history, Kindle
+    change-tracking, backups — is applied here in one idempotent pass, so a
+    v3.3.x database upgrades automatically on first launch and no recrawl or
+    rescrape is required.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stories (
-            url TEXT PRIMARY KEY,
-            title TEXT NOT NULL DEFAULT '',
-            source_host TEXT NOT NULL DEFAULT '',
-            words INTEGER NOT NULL DEFAULT 0,
-            raw_file TEXT NOT NULL DEFAULT '',
-            formatted_file TEXT NOT NULL DEFAULT '',
-            romanized_file TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'pending',
-            integrity_exact INTEGER NOT NULL DEFAULT 0,
-            telugu INTEGER NOT NULL DEFAULT 0,
-            romanized INTEGER NOT NULL DEFAULT 0,
-            paragraphs INTEGER NOT NULL DEFAULT 0,
-            dialogue_breaks INTEGER NOT NULL DEFAULT 0,
-            dialogue_turns INTEGER NOT NULL DEFAULT 0,
-            unsplit_dialogue INTEGER NOT NULL DEFAULT 0,
-            max_paragraph_chars INTEGER NOT NULL DEFAULT 0,
-            quality_pass INTEGER NOT NULL DEFAULT 0,
-            formatter_version INTEGER NOT NULL DEFAULT 0,
-            review_reason TEXT NOT NULL DEFAULT '',
-            error TEXT NOT NULL DEFAULT '',
-            raw_sha256 TEXT NOT NULL DEFAULT '',
-            original_text TEXT NOT NULL DEFAULT '',
-            formatted_text TEXT NOT NULL DEFAULT '',
-            romanized_text TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL DEFAULT '',
-            manual_accept INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)")}
-    formatter_additions = {
-        "dialogue_turns": "INTEGER NOT NULL DEFAULT 0",
-        "unsplit_dialogue": "INTEGER NOT NULL DEFAULT 0",
-        "max_paragraph_chars": "INTEGER NOT NULL DEFAULT 0",
-        "quality_pass": "INTEGER NOT NULL DEFAULT 0",
-        "formatter_version": "INTEGER NOT NULL DEFAULT 0",
-    }
-    for name, declaration in formatter_additions.items():
-        if name not in existing:
-            conn.execute(f"ALTER TABLE stories ADD COLUMN {name} {declaration}")
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stories_status ON stories(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stories_source ON stories(source_host)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_stories_updated ON stories(updated_at)")
+    db_migrations.migrate(conn)
     ensure_story_columns(conn)
     conn.commit()
     return conn
@@ -674,6 +637,26 @@ class StoryFormatter:
         updated = utc_now()
         raw_hash = sha256_text(raw_html)
         words = int(page.get("words") or len(original_norm.split()))
+
+        # v3.6: a previously verified/reviewed story whose raw content has
+        # actually changed on re-scrape must not be silently overwritten --
+        # the site may have edited or replaced the story since it was
+        # accepted. Flag it back into the review queue instead, and remember
+        # what the content used to hash to so the UI can explain why.
+        source_changed = 0
+        previous_raw_sha256 = ""
+        existing = conn.execute(
+            "SELECT status, raw_sha256 FROM stories WHERE url=?", (url,)
+        ).fetchone()
+        if existing and existing["raw_sha256"] and existing["raw_sha256"] != raw_hash \
+                and existing["status"] in ("verified", "review"):
+            source_changed = 1
+            previous_raw_sha256 = existing["raw_sha256"]
+            status = "review"
+            review_reason = "; ".join(
+                filter(None, [review_reason, f"Source content changed since it was last {existing['status']}."])
+            )
+
         conn.execute(
             """
             INSERT INTO stories (
@@ -681,8 +664,8 @@ class StoryFormatter:
                 integrity_exact,telugu,romanized,paragraphs,dialogue_breaks,dialogue_turns,
                 unsplit_dialogue,max_paragraph_chars,quality_pass,formatter_version,
                 review_reason,error,raw_sha256,original_text,formatted_text,romanized_text,
-                updated_at,manual_accept
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+                updated_at,manual_accept,source_changed,previous_raw_sha256
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)
             ON CONFLICT(url) DO UPDATE SET
                 title=excluded.title, source_host=excluded.source_host, words=excluded.words,
                 raw_file=excluded.raw_file, formatted_file=excluded.formatted_file,
@@ -695,7 +678,8 @@ class StoryFormatter:
                 review_reason=excluded.review_reason, error='', raw_sha256=excluded.raw_sha256,
                 original_text=excluded.original_text, formatted_text=excluded.formatted_text,
                 romanized_text=excluded.romanized_text, updated_at=excluded.updated_at,
-                manual_accept=0
+                manual_accept=0, source_changed=excluded.source_changed,
+                previous_raw_sha256=excluded.previous_raw_sha256
             """,
             (
                 url, title, source_host, words, raw_name, formatted_name, romanized_name, status,
@@ -703,6 +687,7 @@ class StoryFormatter:
                 int(quality["dialogue_turns"]), int(quality["unsplit_dialogue"]),
                 int(quality["max_paragraph_chars"]), int(bool(quality["quality_pass"])), FORMATTER_VERSION,
                 review_reason, "", raw_hash, original_text, formatted_text, romanized_text, updated,
+                source_changed, previous_raw_sha256,
             ),
         )
         conn.commit()
@@ -744,7 +729,7 @@ class StoryFormatter:
         )
         conn.commit()
 
-    def run(self, *, force: bool = False, only_url: str | None = None) -> dict[str, int]:
+    def run(self, *, force: bool = False, only_url: str | None = None, kindle_min_interval: float = 0.0) -> dict[str, int]:
         content = self._content_manifest()
         processing = self._manifest()
         processing["version"] = FORMATTER_VERSION
@@ -835,10 +820,13 @@ class StoryFormatter:
                 "SELECT COUNT(*) FROM stories WHERE status IN ('verified','review') AND organized_file=''"
             ).fetchone()[0])
             if unorganized > len(organized_urls):
-                organization = rebuild_library(conn, self.output_dir, self.settings.get("categories", []))
+                organization = rebuild_library(conn, self.output_dir, self.settings.get("categories", []), self.settings.get("category_aliases", {}))
                 mode_label = "rebuilt"
             else:
-                organization = organize_urls(conn, self.output_dir, self.settings.get("categories", []), organized_urls)
+                organization = organize_urls(
+                    conn, self.output_dir, self.settings.get("categories", []), organized_urls, self.settings.get("category_aliases", {}),
+                    kindle_min_interval=kindle_min_interval,
+                )
                 mode_label = "organized"
             if organization["stories"]:
                 print(
@@ -907,7 +895,8 @@ class StoryFormatter:
                 UPDATE stories SET status=?, integrity_exact=1, paragraphs=?, dialogue_turns=?,
                     unsplit_dialogue=?, max_paragraph_chars=?, quality_pass=?, formatter_version=?,
                     review_reason=?, error='', formatted_text=?, romanized_text=?, romanized=?,
-                    formatted_file=?, romanized_file=?, manual_accept=1, updated_at=? WHERE url=?
+                    formatted_file=?, romanized_file=?, manual_accept=1,
+                    source_changed=0, previous_raw_sha256='', updated_at=? WHERE url=?
                 """,
                 (
                     status, len(check_blocks), int(quality["dialogue_turns"]),
@@ -918,7 +907,7 @@ class StoryFormatter:
                 ),
             )
             conn.commit()
-            organize_urls(conn, self.output_dir, self.settings.get("categories", []), [url])
+            organize_urls(conn, self.output_dir, self.settings.get("categories", []), [url], self.settings.get("category_aliases", {}))
             return ProcessResult(
                 url=url, title=row["title"], status=status, integrity_exact=True,
                 formatted_file=formatted_name, romanized_file=romanized_name,
@@ -938,9 +927,13 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=OUTPUT_DIR)
     parser.add_argument("--force", action="store_true", help="reprocess even when raw content is unchanged")
     parser.add_argument("--url", help="process one exact source URL")
+    parser.add_argument(
+        "--kindle-min-interval", type=float, default=0.0,
+        help="skip rewriting library.json more often than this many seconds (0 = always write immediately)",
+    )
     args = parser.parse_args()
     formatter = StoryFormatter(args.output.resolve())
-    counts = formatter.run(force=args.force, only_url=args.url)
+    counts = formatter.run(force=args.force, only_url=args.url, kindle_min_interval=max(0.0, args.kindle_min_interval))
     return 1 if counts["failed"] and not (counts["verified"] or counts["review"] or counts["skipped"]) else 0
 
 

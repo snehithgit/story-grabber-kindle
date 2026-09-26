@@ -11,10 +11,8 @@
   "formatter_long_block_chars": 900,
   "formatter_review_block_chars": 1800,
   "stories_per_page": 50,
-  "scrape_mode": "auto",
+  "scrape_mode": "manual",
   "auto_scrape_batch_size": 20,
-  "categories": [
-    "vadina",
-    "vadhina"
-  ]
+  "categories": [],
+  "category_aliases": {}
 }

@@ -98,6 +98,80 @@ class StoryFormatterTests(unittest.TestCase):
         self.assertEqual(title, "Title")
         self.assertEqual(blocks, paragraphs)
 
+    def test_source_change_on_rescrape_flags_review_instead_of_silent_overwrite(self):
+        """v3.6: if a previously verified story's raw HTML changes on a later
+        scrape (the site edited or replaced it), the formatter must not
+        silently overwrite the accepted story -- it should flip back to
+        'review' and record what the content used to hash to.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "pages").mkdir()
+            raw_v1 = (
+                "<!doctype html><html><head><title>Test</title></head><body>"
+                "<article><h1>Test</h1><div>Brother: hello Sister: hi</div></article>"
+                "</body></html>"
+            )
+            (out / "pages" / "test.html").write_text(raw_v1, encoding="utf-8")
+            manifest = {"pages": {"https://example.com/test": {"status": "success", "title": "Test", "words": 4, "html_file": "pages/test.html"}}}
+            (out / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+            formatter = StoryFormatter(out)
+            result = formatter.run()
+            self.assertEqual(result["verified"], 1)
+
+            con = sqlite3.connect(out / "story_library.sqlite3")
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT status, raw_sha256, source_changed FROM stories WHERE url=?", ("https://example.com/test",)).fetchone()
+            self.assertEqual(row["status"], "verified")
+            self.assertEqual(row["source_changed"], 0)
+            original_hash = row["raw_sha256"]
+            con.close()
+
+            # Site republishes the page with different content.
+            raw_v2 = (
+                "<!doctype html><html><head><title>Test</title></head><body>"
+                "<article><h1>Test</h1><div>Brother: completely different words now here</div></article>"
+                "</body></html>"
+            )
+            (out / "pages" / "test.html").write_text(raw_v2, encoding="utf-8")
+
+            formatter2 = StoryFormatter(out)
+            formatter2.run()
+
+            con = sqlite3.connect(out / "story_library.sqlite3")
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT status, review_reason, source_changed, previous_raw_sha256, raw_sha256 FROM stories WHERE url=?",
+                ("https://example.com/test",),
+            ).fetchone()
+            con.close()
+            self.assertEqual(row["status"], "review")
+            self.assertEqual(row["source_changed"], 1)
+            self.assertEqual(row["previous_raw_sha256"], original_hash)
+            self.assertNotEqual(row["raw_sha256"], original_hash)
+            self.assertIn("Source content changed", row["review_reason"])
+
+            # A human resolving the review (accepting the new breaks as-is,
+            # via the same code path as "Use original breaks"/"Accept as-is")
+            # must clear the stale flag -- otherwise it would say "source
+            # changed" forever even after someone has looked at it.
+            con = sqlite3.connect(out / "story_library.sqlite3")
+            con.row_factory = sqlite3.Row
+            original_text = con.execute("SELECT original_text FROM stories WHERE url=?", ("https://example.com/test",)).fetchone()["original_text"]
+            con.close()
+            formatter2.save_manual_format("https://example.com/test", original_text)
+
+            con = sqlite3.connect(out / "story_library.sqlite3")
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT source_changed, previous_raw_sha256 FROM stories WHERE url=?",
+                ("https://example.com/test",),
+            ).fetchone()
+            con.close()
+            self.assertEqual(row["source_changed"], 0)
+            self.assertEqual(row["previous_raw_sha256"], "")
+
     def test_manual_editor_rejects_word_changes(self):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)

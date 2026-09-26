@@ -107,9 +107,29 @@
               <select id="story-status"><option value="all">All statuses</option><option value="verified">Verified</option><option value="review">Needs review</option><option value="failed">Failed</option></select>
               <select id="story-sort"><option value="newest">Newest</option><option value="title">Title</option><option value="longest">Longest</option></select>
             </div>
-            <div class="table-wrap"><table class="data-table mobile-card-table"><thead><tr><th>Story</th><th>Folder</th><th>Category</th><th>Words</th><th>Status</th><th></th></tr></thead><tbody id="stories-table"></tbody></table></div>
+            <div class="bulk-bar">
+              <label><input type="checkbox" id="stories-select-all"> Select page</label>
+              <span id="stories-selection-count">0 selected</span>
+              <select id="bulk-category-select"><option value="">Move to category…</option></select>
+              <button class="btn small" id="bulk-move" type="button">Move</button>
+              <button class="btn small" id="bulk-unlock" type="button">Return to automatic</button>
+            </div>
+            <div class="table-wrap"><table class="data-table mobile-card-table"><thead><tr><th class="select-column"></th><th>Story</th><th>Folder</th><th>Category</th><th>Words</th><th>Status</th><th></th></tr></thead><tbody id="stories-table"></tbody></table></div>
             <div class="pagination" id="stories-pagination"></div>
           </section>
+
+          <details class="panel">
+            <summary><strong>Series manager</strong> <span id="series-count" class="muted"></span></summary>
+            <p class="muted">Multipart stories grouped by series, with any missing part numbers flagged.</p>
+            <div id="series-list"></div>
+          </details>
+
+          <details class="panel">
+            <summary><strong>Possible duplicates</strong> <span id="duplicates-count" class="muted"></span></summary>
+            <p class="muted">Same content scraped twice, matching titles, or near-identical titles of a similar length. Detected by exact content hash and text comparison — not an AI judgment.</p>
+            <button class="btn small" id="scan-duplicates" type="button">Scan for duplicates</button>
+            <div id="duplicates-list"></div>
+          </details>
         </section>
 
         <section class="page" data-page="settings">
@@ -117,7 +137,8 @@
           <form id="settings-form" class="settings-stack">
             <section class="panel">
               <div class="panel-head"><div><h2>Categories</h2><p>One category per line. Category matching checks the story title first; only when no title match exists does it search the story content.</p></div></div>
-              <label class="field"><span>Category names</span><textarea name="categories" rows="7" placeholder="Family\nCollege\nRomance"></textarea><small>Priority: <b>title → story content → Uncategorized</b>. The first configured match within each phase wins. Existing stories can be updated from Library → Re-categorize Library.</small></label>
+              <label class="field"><span>Category names</span><textarea name="categories" rows="7" placeholder="Family\nCollege\nThammudu"></textarea><small>These are the canonical folder names. Priority: <b>title → story content → Uncategorized</b>.</small></label>
+              <label class="field"><span>Category aliases</span><textarea name="category_aliases" rows="6" placeholder="Thammudu = thammudu, tammudu, thamudu\nVadina = vadhina, vadina"></textarea><small>Format: <b>Canonical = alias1, alias2</b>. Aliases match the same canonical folder and never create separate categories. Existing stories can be updated with Library → Re-categorize Library.</small></label>
             </section>
             <section class="panel">
               <div class="panel-head"><div><h2>Defaults</h2><p>Used when starting a new crawl.</p></div></div>
@@ -139,9 +160,34 @@
                 <label class="field"><span>Scrape limit (0 = all)</span><input name="content_limit" type="number" min="0" max="250000"></label>
                 <label class="field"><span>Browser mode</span><select name="browser_mode"><option value="background">Background</option><option value="headless">Headless</option><option value="visible">Visible</option></select></label>
               </div>
+              <label class="field details-body"><span>Per-site crawl delay overrides</span><textarea name="site_profiles" rows="4" placeholder="slow-site.example = 3\nanother-site.example = 1.5"></textarea><small>Format: <b>host = seconds</b>. Sets a minimum delay for that host only, on top of the crawl delay above and robots.txt. Use this for sites that block or throttle aggressive crawlers.</small></label>
             </details>
             <div class="form-actions"><button class="btn primary" type="submit">Save settings</button><span class="form-message" id="settings-message"></span></div>
           </form>
+
+          <section class="panel maintenance-panel">
+            <div class="panel-head"><div><h2>Maintenance</h2><p>Integrity checks, repair, and backups. Raw pages are never deleted by these tools — a re-scrape is the only way to replace one that's genuinely missing.</p></div></div>
+            <div class="maintenance-actions">
+              <button class="btn" id="run-integrity-check" type="button">Run integrity check</button>
+              <button class="btn" id="run-repair" type="button">Repair library</button>
+              <button class="btn" id="run-analyze" type="button">Analyze DB</button>
+              <button class="btn" id="run-vacuum" type="button">Vacuum DB</button>
+              <button class="btn" id="run-backup" type="button">Create backup</button>
+              <button class="btn" id="retry-failed-links" type="button">Retry failed links</button>
+            </div>
+            <div class="muted" id="maintenance-storage"></div>
+            <div id="maintenance-issues"></div>
+
+            <details class="panel">
+              <summary><strong>Backups</strong> <span id="backups-count" class="muted"></span></summary>
+              <div id="backups-list"></div>
+            </details>
+
+            <details class="panel">
+              <summary><strong>Job history</strong> <span id="jobs-history-count" class="muted"></span></summary>
+              <div id="jobs-history-list"></div>
+            </details>
+          </section>
         </section>
 
         <section class="page" data-page="story">

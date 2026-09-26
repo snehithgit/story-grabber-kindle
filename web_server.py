@@ -46,10 +46,19 @@ PIPELINE = ROOT / "story_pipeline.py"
 FORMATTER = ROOT / "story_formatter.py"
 AUTO_SCRAPER = ROOT / "auto_scrape.py"
 LIBRARY_DIR = OUTPUT_DIR / "library"
+BACKUPS_DIR = ROOT / "backups"
 
 from story_formatter import StoryFormatter, connect_library  # noqa: E402
-from story_organizer import normalize_categories, rebuild_library  # noqa: E402
+from story_organizer import (  # noqa: E402
+    bulk_set_category, bulk_unlock_category, list_series, normalize_categories,
+    normalize_category_aliases, rebuild_library,
+)
 from kindle_export import write_kindle_manifest  # noqa: E402
+import links_store  # noqa: E402
+import job_store  # noqa: E402
+import db_migrations  # noqa: E402
+import duplicate_detector  # noqa: E402
+import maintenance  # noqa: E402
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "crawler_depth": 1,
@@ -67,11 +76,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "scrape_mode": "manual",
     "auto_scrape_batch_size": 20,
     "categories": [],
+    "category_aliases": {},
+    "site_profiles": {},
 }
 
 SETTINGS_LOCK = threading.Lock()
-LINK_CACHE_LOCK = threading.Lock()
-LINK_CACHE: tuple[tuple[int, int], list[dict[str, str]], list[dict[str, Any]]] | None = None
+# Serializes destructive maintenance against engine startup.  The gate is
+# always acquired before JobManager.lock to avoid a restore/start TOCTOU race.
+MAINTENANCE_GATE = threading.Lock()
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -88,14 +100,6 @@ def clamp_float(value: Any, default: float, minimum: float, maximum: float) -> f
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, number))
-
-
-def file_token(path: Path) -> tuple[int, int]:
-    try:
-        stat = path.stat()
-        return stat.st_mtime_ns, stat.st_size
-    except OSError:
-        return 0, 0
 
 
 def atomic_text(path: Path, text: str) -> None:
@@ -144,7 +148,43 @@ def sanitize_settings(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(categories, str):
         categories = categories.splitlines()
     current["categories"] = normalize_categories(categories if isinstance(categories, list) else [])
+    aliases = payload.get("category_aliases", current.get("category_aliases", {}))
+    current["category_aliases"] = normalize_category_aliases(aliases, current["categories"])
+    current["site_profiles"] = normalize_site_profiles(payload.get("site_profiles", current.get("site_profiles", {})))
     return current
+
+
+def normalize_site_profiles(raw: Any) -> dict[str, float]:
+    """v3.7: per-host crawl-delay floor, e.g. ``{"slow-site.example": 3.0}``.
+
+    Accepts either a dict (as sent by the JSON API) or "host = seconds"
+    lines (as typed into the Settings textarea, mirroring how category
+    aliases are edited). Unparseable entries are dropped rather than
+    rejecting the whole settings save.
+    """
+    if isinstance(raw, str):
+        pairs: list[tuple[Any, Any]] = []
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            host, _, value = stripped.partition("=")
+            pairs.append((host.strip(), value.strip()))
+    elif isinstance(raw, dict):
+        pairs = list(raw.items())
+    else:
+        pairs = []
+    result: dict[str, float] = {}
+    for host, value in pairs:
+        host_name = str(host).strip().lower()
+        if not host_name:
+            continue
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            continue
+        result[host_name] = max(0.0, min(60.0, seconds))
+    return result
 
 
 def valid_sites(raw: str) -> list[str]:
@@ -167,73 +207,15 @@ def valid_sites(raw: str) -> list[str]:
     return result
 
 
-def load_json(path: Path, default: Any) -> Any:
-    try:
-        return json.loads(path.read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
+def sync_links(conn: sqlite3.Connection) -> None:
+    """Bring the ``links`` table up to date with sublinks.json/manifest.json/progress.jsonl.
 
-
-def load_content_manifest() -> dict[str, Any]:
-    manifest = load_json(OUTPUT_DIR / "manifest.json", {"pages": {}})
-    if not isinstance(manifest, dict):
-        manifest = {"pages": {}}
-    manifest.setdefault("pages", {})
-    progress = OUTPUT_DIR / "progress.jsonl"
-    if progress.is_file():
-        try:
-            for line in progress.read_text("utf-8", errors="replace").splitlines():
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(entry, dict) and entry.get("url") and entry.get("state"):
-                    manifest["pages"][entry["url"]] = entry["state"]
-        except OSError:
-            pass
-    return manifest
-
-
-def _group_source(group: dict[str, Any], index: int) -> str:
-    return str(group.get("main_site") or group.get("site") or group.get("url") or f"Source {index + 1}")
-
-
-def load_link_records() -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    global LINK_CACHE
-    token = file_token(SUBLINKS_FILE)
-    with LINK_CACHE_LOCK:
-        if LINK_CACHE and LINK_CACHE[0] == token:
-            return LINK_CACHE[1], LINK_CACHE[2]
-    records: list[dict[str, str]] = []
-    groups_out: list[dict[str, Any]] = []
-    payload = load_json(SUBLINKS_FILE, [])
-    groups = payload if isinstance(payload, list) else [payload]
-    seen: set[str] = set()
-    for index, group in enumerate(groups):
-        if not isinstance(group, dict):
-            continue
-        source = _group_source(group, index)
-        count = 0
-        for entry in group.get("sublinks", []) or []:
-            if isinstance(entry, str):
-                url, title = entry, entry
-            elif isinstance(entry, dict):
-                url = str(entry.get("link") or entry.get("url") or "")
-                title = str(entry.get("title") or entry.get("name") or url)
-            else:
-                continue
-            if not url or url in seen:
-                continue
-            parsed = urlparse(url)
-            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                continue
-            seen.add(url)
-            count += 1
-            records.append({"url": url, "title": title, "source": source, "host": parsed.hostname or ""})
-        groups_out.append({"source": source, "links": count})
-    with LINK_CACHE_LOCK:
-        LINK_CACHE = (token, records, groups_out)
-    return records, groups_out
+    Cheap to call on every request: each source is guarded by a file token
+    (sublinks.json, manifest.json) or a byte offset (progress.jsonl), so an
+    unchanged file costs one stat() call rather than a full re-parse. See
+    links_store.py for why this replaced the old per-request JSON merge.
+    """
+    links_store.sync_all(conn, SUBLINKS_FILE, OUTPUT_DIR)
 
 
 @dataclass
@@ -248,6 +230,7 @@ class Job:
     error: str | None = None
     stop_requested: bool = False
     process: subprocess.Popen[str] | None = field(default=None, repr=False)
+    run_id: int | None = field(default=None, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -277,23 +260,41 @@ class JobManager:
         with self.lock:
             return {name: job.snapshot() for name, job in self.jobs.items()}
 
-    def start(self, name: str, command: list[str]) -> None:
+    def any_running(self) -> bool:
         with self.lock:
-            if name not in self.jobs:
-                raise RuntimeError(f"Unknown engine: {name}")
-            if any(job.state in {"running", "stopping"} for job in self.jobs.values()):
-                raise RuntimeError("Another engine is already running.")
-            job = self.jobs[name]
-            job.state = "running"
-            job.command = list(command)
-            job.logs = ["Starting engine..."]
-            job.started_at = time.time()
-            job.finished_at = None
-            job.exit_code = None
-            job.error = None
-            job.stop_requested = False
-            job.process = None
-        threading.Thread(target=self._run, args=(name,), daemon=True).start()
+            return any(job.state in {"running", "stopping"} for job in self.jobs.values())
+
+    def start(self, name: str, command: list[str]) -> None:
+        # Destructive maintenance (restore/rebuild/vacuum) holds the same gate
+        # for its complete critical section.  Marking the job running while
+        # holding it closes the old check-then-start race.
+        with MAINTENANCE_GATE:
+            with self.lock:
+                if name not in self.jobs:
+                    raise RuntimeError(f"Unknown engine: {name}")
+                if any(job.state in {"running", "stopping"} for job in self.jobs.values()):
+                    raise RuntimeError("Another engine is already running.")
+                job = self.jobs[name]
+                job.state = "running"
+                job.command = list(command)
+                job.logs = ["Starting engine..."]
+                job.started_at = time.time()
+                job.finished_at = None
+                job.exit_code = None
+                job.error = None
+                job.stop_requested = False
+                job.process = None
+                job.run_id = None
+            try:
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    job.run_id = job_store.start_run(conn, name, command)
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:
+                job.run_id = None  # history is best-effort; never block the engine on it
+            threading.Thread(target=self._run, args=(name,), daemon=True).start()
 
     def stop(self, name: str) -> None:
         with self.lock:
@@ -384,6 +385,7 @@ class JobManager:
                     logs.append(line.rstrip())
                     if len(logs) > 1500:
                         del logs[:300]
+            process.stdout.close()
             code = process.wait()
             with self.lock:
                 job = self.jobs[name]
@@ -401,6 +403,8 @@ class JobManager:
                 else:
                     job.state = "failed"
                     job.error = f"Engine exited with code {code}."
+                run_id, final_state, exit_code, error = job.run_id, job.state, job.exit_code, job.error
+            self._record_finish(run_id, final_state, exit_code, error)
         except Exception as exc:
             with self.lock:
                 job = self.jobs[name]
@@ -409,64 +413,117 @@ class JobManager:
                 job.logs.append(f"ERROR: {exc}")
                 job.finished_at = time.time()
                 job.process = None
+                run_id = job.run_id
+            self._record_finish(run_id, "failed", None, str(exc))
+
+    @staticmethod
+    def _record_finish(run_id: int | None, state: str, exit_code: int | None, error: str | None) -> None:
+        """Best-effort job-history write; never lets history recording break the engine."""
+        if run_id is None:
+            return
+        try:
+            conn = connect_library(LIBRARY_DB)
+            try:
+                job_store.finish_run(conn, run_id, state=state, exit_code=exit_code, error=error or "")
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
 
 
 JOBS = JobManager()
 
 
-def query_library(
-    *, q: str = "", status: str = "all", language: str = "all", category: str = "all", page: int = 1,
-    per_page: int = 50, sort: str = "newest",
+def _fts_match_expression(q: str) -> str | None:
+    """Turn free text into a safe FTS5 MATCH expression, or None if unusable.
+
+    Each token is double-quoted (so punctuation/URLs can't be interpreted as
+    FTS5 query syntax) and ANDed together; the final token gets a trailing
+    ``*`` for prefix matching, which gives live-search-as-you-type behavior.
+    """
+    tokens = [t.replace('"', '""') for t in q.strip().split() if t]
+    if not tokens:
+        return None
+    quoted = [f'"{t}"' for t in tokens[:-1]] + [f'"{tokens[-1]}"*']
+    return " AND ".join(quoted)
+
+
+def query_library_conn(
+    conn: sqlite3.Connection, *, q: str = "", status: str = "all", language: str = "all",
+    category: str = "all", page: int = 1, per_page: int = 50, sort: str = "newest",
 ) -> dict[str, Any]:
-    if not LIBRARY_DB.is_file():
-        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
-    conn = connect_library(LIBRARY_DB)
-    try:
-        where: list[str] = []
-        params: list[Any] = []
-        if status in {"verified", "review", "failed"}:
-            where.append("status=?")
-            params.append(status)
-        if language == "telugu":
-            where.append("telugu=1")
-        elif language == "romanized":
-            where.append("romanized=1")
-        elif language == "english":
-            where.append("telugu=0")
-        if category and category != "all":
-            where.append("category=?")
-            params.append(category)
-        q = q.strip()
+    where: list[str] = []
+    params: list[Any] = []
+    if status in {"verified", "review", "failed"}:
+        where.append("status=?")
+        params.append(status)
+    if language == "telugu":
+        where.append("telugu=1")
+    elif language == "romanized":
+        where.append("romanized=1")
+    elif language == "english":
+        where.append("telugu=0")
+    if category and category != "all":
+        where.append("category=?")
+        params.append(category)
+    q = q.strip()
+    columns = (
+        "url,title,source_host,words,status,integrity_exact,telugu,romanized,"
+        "paragraphs,dialogue_breaks,dialogue_turns,unsplit_dialogue,max_paragraph_chars,"
+        "quality_pass,formatter_version,review_reason,error,updated_at,manual_accept,"
+        "series_title,part_number,category,category_source,organized_file"
+    )
+    order = {
+        "newest": "updated_at DESC",
+        "oldest": "updated_at ASC",
+        "title": "title COLLATE NOCASE ASC",
+        "longest": "words DESC",
+    }.get(sort, "updated_at DESC")
+
+    match_expr = _fts_match_expression(q) if q else None
+    if match_expr and db_migrations.fts_available(conn):
+        # v3.4 P0: FTS5 instead of a %LIKE% full-table scan across large text
+        # columns. Falls back to LIKE automatically if FTS5 isn't compiled in.
+        fts_clause = "s.rowid IN (SELECT rowid FROM stories_fts WHERE stories_fts MATCH ?)"
+        where_all = [fts_clause, *where]
+        params_all = [match_expr, *params]
+        clause = " WHERE " + " AND ".join(where_all)
+        total = int(conn.execute(f"SELECT COUNT(*) FROM stories s{clause}", params_all).fetchone()[0])
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            f"SELECT {columns} FROM stories s{clause} ORDER BY {order} LIMIT ? OFFSET ?",
+            [*params_all, per_page, offset],
+        ).fetchall()
+    else:
         if q:
             like = f"%{q}%"
             where.append("(title LIKE ? OR url LIKE ? OR original_text LIKE ? OR romanized_text LIKE ?)")
             params.extend([like, like, like, like])
         clause = " WHERE " + " AND ".join(where) if where else ""
-        order = {
-            "newest": "updated_at DESC",
-            "oldest": "updated_at ASC",
-            "title": "title COLLATE NOCASE ASC",
-            "longest": "words DESC",
-        }.get(sort, "updated_at DESC")
         total = int(conn.execute(f"SELECT COUNT(*) FROM stories{clause}", params).fetchone()[0])
         offset = (page - 1) * per_page
         rows = conn.execute(
-            f"""
-            SELECT url,title,source_host,words,status,integrity_exact,telugu,romanized,
-                   paragraphs,dialogue_breaks,dialogue_turns,unsplit_dialogue,max_paragraph_chars,
-                   quality_pass,formatter_version,review_reason,error,updated_at,manual_accept,
-                   series_title,part_number,category,organized_file
-            FROM stories{clause} ORDER BY {order} LIMIT ? OFFSET ?
-            """,
+            f"SELECT {columns} FROM stories{clause} ORDER BY {order} LIMIT ? OFFSET ?",
             [*params, per_page, offset],
         ).fetchall()
-        return {
-            "items": [dict(row) for row in rows],
-            "total": total,
-            "page": page,
-            "per_page": per_page,
-            "pages": (total + per_page - 1) // per_page if total else 0,
-        }
+    return {
+        "items": [dict(row) for row in rows],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page if total else 0,
+    }
+
+
+def query_library(**kwargs: Any) -> dict[str, Any]:
+    if not LIBRARY_DB.is_file():
+        page = int(kwargs.get("page", 1))
+        per_page = int(kwargs.get("per_page", 50))
+        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
+    conn = connect_library(LIBRARY_DB)
+    try:
+        return query_library_conn(conn, **kwargs)
     finally:
         conn.close()
 
@@ -482,45 +539,43 @@ def get_story(url: str) -> dict[str, Any] | None:
         conn.close()
 
 
-def story_counts() -> dict[str, int]:
+def story_counts_conn(conn: sqlite3.Connection) -> dict[str, int]:
     counts = {"total": 0, "verified": 0, "review": 0, "failed": 0, "romanized": 0}
+    for status, count in conn.execute("SELECT status,COUNT(*) FROM stories GROUP BY status"):
+        counts["total"] += int(count)
+        if status in counts:
+            counts[status] = int(count)
+    counts["romanized"] = int(conn.execute("SELECT COUNT(*) FROM stories WHERE romanized=1").fetchone()[0])
+    return counts
+
+
+def story_counts() -> dict[str, int]:
     if not LIBRARY_DB.is_file():
-        return counts
+        return {"total": 0, "verified": 0, "review": 0, "failed": 0, "romanized": 0}
     conn = connect_library(LIBRARY_DB)
     try:
-        for status, count in conn.execute("SELECT status,COUNT(*) FROM stories GROUP BY status"):
-            counts["total"] += int(count)
-            if status in counts:
-                counts[status] = int(count)
-        counts["romanized"] = int(conn.execute("SELECT COUNT(*) FROM stories WHERE romanized=1").fetchone()[0])
-        return counts
+        return story_counts_conn(conn)
     finally:
         conn.close()
 
 
 def build_summary() -> dict[str, Any]:
+    """v3.4 P0/P1: a handful of indexed SQL queries instead of a full JSON merge.
+
+    Everything here now comes from one shared connection: sync links from
+    disk (cheap when nothing changed), then read aggregate counts straight
+    from SQLite -- no more looping every discovered link/story in Python on
+    every Dashboard refresh.
+    """
     settings = load_settings()
-    records, group_defs = load_link_records()
-    manifest = load_content_manifest()
-    states = manifest.get("pages", {}) if isinstance(manifest.get("pages"), dict) else {}
-    raw_success = sum(1 for state in states.values() if isinstance(state, dict) and state.get("status") == "success")
-    raw_failed = sum(1 for state in states.values() if isinstance(state, dict) and state.get("status") == "failed")
-    counts = story_counts()
-
-    source_map: dict[str, dict[str, Any]] = {}
-    for group in group_defs:
-        source_map[group["source"]] = {"source": group["source"], "links": group["links"], "scraped": 0, "failed": 0}
-    for record in records:
-        state = states.get(record["url"], {})
-        target = source_map.setdefault(record["source"], {"source": record["source"], "links": 0, "scraped": 0, "failed": 0})
-        if state.get("status") == "success":
-            target["scraped"] += 1
-        elif state.get("status") == "failed":
-            target["failed"] += 1
-    for item in source_map.values():
-        item["pending"] = max(0, item["links"] - item["scraped"] - item["failed"])
-
-    recent = query_library(page=1, per_page=8, sort="newest")["items"]
+    conn = connect_library(LIBRARY_DB)
+    try:
+        sync_links(conn)
+        counts = links_store.dashboard_counts(conn)
+        stories = story_counts_conn(conn)
+        recent = query_library_conn(conn, page=1, per_page=8, sort="newest")["items"]
+    finally:
+        conn.close()
     sites = []
     if SITES_FILE.is_file():
         try:
@@ -529,13 +584,13 @@ def build_summary() -> dict[str, Any]:
             pass
     return {
         "sites": sites,
-        "site_count": len(group_defs) or len(sites),
-        "links": len(records),
-        "raw_success": raw_success,
-        "raw_failed": raw_failed,
-        "pending_links": max(0, len(records) - raw_success - raw_failed),
-        "stories": counts,
-        "sources": list(source_map.values()),
+        "site_count": len(counts["sources"]) or len(sites),
+        "links": counts["links"],
+        "raw_success": counts["scraped"],
+        "raw_failed": counts["failed"],
+        "pending_links": counts["pending"],
+        "stories": stories,
+        "sources": counts["sources"],
         "recent": recent,
         "categories": settings.get("categories", []),
         "settings": settings,
@@ -543,32 +598,16 @@ def build_summary() -> dict[str, Any]:
 
 
 def list_links(params: dict[str, list[str]]) -> dict[str, Any]:
-    records, _ = load_link_records()
-    manifest = load_content_manifest()
-    states = manifest.get("pages", {}) if isinstance(manifest.get("pages"), dict) else {}
-    q = (params.get("q", [""])[0] or "").strip().casefold()
+    q = params.get("q", [""])[0] or ""
     status_filter = (params.get("status", ["all"])[0] or "all").lower()
     page = clamp_int(params.get("page", [1])[0], 1, 1, 1_000_000)
     per_page = clamp_int(params.get("per_page", [50])[0], 50, 10, 100)
-    filtered: list[dict[str, Any]] = []
-    for record in records:
-        state = states.get(record["url"], {})
-        raw_status = state.get("status") if isinstance(state, dict) else None
-        status = "scraped" if raw_status == "success" else "failed" if raw_status == "failed" else "pending"
-        if status_filter in {"scraped", "failed", "pending"} and status != status_filter:
-            continue
-        if q and q not in record["title"].casefold() and q not in record["url"].casefold():
-            continue
-        filtered.append({**record, "status": status})
-    total = len(filtered)
-    start = (page - 1) * per_page
-    return {
-        "items": filtered[start:start + per_page],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page if total else 0,
-    }
+    conn = connect_library(LIBRARY_DB)
+    try:
+        sync_links(conn)
+        return links_store.list_links_db(conn, q=q, status=status_filter, page=page, per_page=per_page)
+    finally:
+        conn.close()
 
 
 class LocalThreadingHTTPServer(ThreadingHTTPServer):
@@ -739,6 +778,77 @@ class AppHandler(BaseHTTPRequestHandler):
         if route == "/api/settings":
             self.send_json(load_settings())
             return
+        if route == "/api/library/duplicates":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"groups": [], "group_count": 0, "story_count": 0})
+                return
+            include_fuzzy = (params.get("fuzzy", ["1"])[0] or "1") not in {"0", "false"}
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json(duplicate_detector.find_duplicates(conn, include_fuzzy=include_fuzzy))
+            finally:
+                conn.close()
+            return
+        if route == "/api/library/series":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"series": []})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json({"series": list_series(conn)})
+            finally:
+                conn.close()
+            return
+        if route == "/api/jobs/history":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"runs": []})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json({"runs": job_store.recent_runs(conn)})
+            finally:
+                conn.close()
+            return
+        if route == "/api/maintenance/integrity":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"issues": [], "issue_count": 0, "by_type": {}, "checked_at": maintenance.utc_now()})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json(maintenance.integrity_check(conn, OUTPUT_DIR))
+            finally:
+                conn.close()
+            return
+        if route == "/api/maintenance/storage":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"database_bytes": 0, "story_count": 0, "link_count": 0})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json(maintenance.storage_health(conn, LIBRARY_DB, OUTPUT_DIR))
+            finally:
+                conn.close()
+            return
+        if route == "/api/maintenance/backups":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"backups": []})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json({"backups": maintenance.list_backups(conn)})
+            finally:
+                conn.close()
+            return
+        if route == "/api/links/retry-failed":
+            if not LIBRARY_DB.is_file():
+                self.send_json({"urls": []})
+                return
+            conn = connect_library(LIBRARY_DB)
+            try:
+                self.send_json({"urls": links_store.retryable_failed(conn)})
+            finally:
+                conn.close()
+            return
         if route == "/api/status/all":
             self.send_json(JOBS.all_snapshots())
             return
@@ -771,12 +881,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 sites = valid_sites(str(payload.get("sites", "")))
                 atomic_text(SITES_FILE, "\n".join(sites) + "\n")
+                site_profiles = settings.get("site_profiles", {})
                 command = [
                     sys.executable, str(CRAWLER), str(SITES_FILE), "-o", str(SUBLINKS_FILE),
                     "--depth", str(clamp_int(payload.get("depth"), settings["crawler_depth"], 0, 10)),
                     "--max-pages", str(clamp_int(payload.get("max_pages"), settings["crawler_max_pages"], 1, 250000)),
                     "--delay", str(clamp_float(payload.get("delay"), settings["crawler_delay"], 0, 60)),
                 ]
+                if site_profiles:
+                    command.extend(["--site-profiles", json.dumps(site_profiles)])
                 if payload.get("fresh") is True:
                     command.append("--fresh")
                 scrape_mode = str(payload.get("scrape_mode", settings.get("scrape_mode", "manual"))).lower()
@@ -794,6 +907,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         "--batch-size", str(settings.get("auto_scrape_batch_size", 20)),
                         "--browser-mode", str(settings.get("browser_mode", "background")),
                     ]
+                    if site_profiles:
+                        auto_command.extend(["--site-profiles", json.dumps(site_profiles)])
                     if payload.get("fresh") is True:
                         auto_command.append("--fresh")
                     JOBS.start("auto", auto_command)
@@ -809,31 +924,31 @@ class AppHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 input_file = SUBLINKS_FILE
                 requested_urls = payload.get("urls")
-                records, _ = load_link_records()
-                if payload.get("pending_only") is True:
-                    states = load_content_manifest().get("pages", {})
-                    selected = [
-                        {"link": item["url"], "title": item["title"]}
-                        for item in records
-                        if not isinstance(states.get(item["url"]), dict)
-                        or states.get(item["url"], {}).get("status") not in {"success", "failed"}
-                    ]
-                    if not selected:
-                        raise ValueError("There are no pending links to scrape.")
-                    atomic_text(SELECTED_LINKS_FILE, json.dumps(selected, ensure_ascii=False, indent=2) + "\n")
-                    input_file = SELECTED_LINKS_FILE
-                elif isinstance(requested_urls, list) and requested_urls:
-                    wanted = {str(item) for item in requested_urls if str(item).startswith(("http://", "https://"))}
-                    if not wanted:
-                        raise ValueError("No valid selected URLs were supplied.")
-                    selected = [
-                        {"link": item["url"], "title": item["title"]}
-                        for item in records if item["url"] in wanted
-                    ]
-                    if not selected:
-                        raise ValueError("Selected URLs were not found in the crawl results.")
-                    atomic_text(SELECTED_LINKS_FILE, json.dumps(selected, ensure_ascii=False, indent=2) + "\n")
-                    input_file = SELECTED_LINKS_FILE
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    sync_links(conn)
+                    if payload.get("pending_only") is True:
+                        rows = conn.execute("SELECT url, title FROM links WHERE status='pending'").fetchall()
+                        selected = [{"link": row["url"], "title": row["title"]} for row in rows]
+                        if not selected:
+                            raise ValueError("There are no pending links to scrape.")
+                        atomic_text(SELECTED_LINKS_FILE, json.dumps(selected, ensure_ascii=False, indent=2) + "\n")
+                        input_file = SELECTED_LINKS_FILE
+                    elif isinstance(requested_urls, list) and requested_urls:
+                        wanted = {str(item) for item in requested_urls if str(item).startswith(("http://", "https://"))}
+                        if not wanted:
+                            raise ValueError("No valid selected URLs were supplied.")
+                        placeholders = ",".join("?" for _ in wanted)
+                        rows = conn.execute(
+                            f"SELECT url, title FROM links WHERE url IN ({placeholders})", list(wanted)
+                        ).fetchall()
+                        selected = [{"link": row["url"], "title": row["title"]} for row in rows]
+                        if not selected:
+                            raise ValueError("Selected URLs were not found in the crawl results.")
+                        atomic_text(SELECTED_LINKS_FILE, json.dumps(selected, ensure_ascii=False, indent=2) + "\n")
+                        input_file = SELECTED_LINKS_FILE
+                finally:
+                    conn.close()
                 mode = str(payload.get("browser_mode", settings.get("browser_mode", "background")))
                 if mode not in {"background", "headless", "visible"}:
                     mode = "background"
@@ -864,16 +979,135 @@ class AppHandler(BaseHTTPRequestHandler):
                 if not LIBRARY_DB.is_file():
                     raise ValueError("Story library database does not exist yet.")
                 settings = load_settings()
-                conn = connect_library(LIBRARY_DB)
-                try:
-                    result = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []))
-                finally:
-                    conn.close()
+                with MAINTENANCE_GATE:
+                    if JOBS.any_running():
+                        raise ValueError("Stop all running engines before re-categorizing the library.")
+                    conn = connect_library(LIBRARY_DB)
+                    try:
+                        result = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []), settings.get("category_aliases", {}))
+                    finally:
+                        conn.close()
                 self.send_json({
                     "ok": True,
-                    "message": f"Re-categorized {result.get('stories', 0)} story files with title-first rules.",
+                    "message": f"Re-categorized {result.get('stories', 0)} story files with title-first alias rules.",
                     "organization": result,
                 })
+                return
+
+            if route == "/api/library/bulk":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                urls = payload.get("urls")
+                if not isinstance(urls, list) or not urls:
+                    raise ValueError("Select at least one story.")
+                action = str(payload.get("action") or "")
+                settings = load_settings()
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    if action == "set_category":
+                        category = str(payload.get("category") or "").strip()
+                        if not category:
+                            raise ValueError("Choose a category to move these stories to.")
+                        result = bulk_set_category(conn, OUTPUT_DIR, urls, category)
+                        affected = int(result.get("affected", 0))
+                        copied = int(result.get("stories", 0))
+                        message = (
+                            f"Updated category for {affected} story record(s); "
+                            f"moved {copied} available story file(s) to \"{category}\"."
+                        )
+                    elif action == "unlock":
+                        result = bulk_unlock_category(
+                            conn, OUTPUT_DIR, urls, settings.get("categories", []), settings.get("category_aliases", {}),
+                        )
+                        message = f"Returned {result.get('stories', 0)} story(ies) to automatic categorization."
+                    else:
+                        raise ValueError(f"Unknown bulk action: {action}")
+                finally:
+                    conn.close()
+                self.send_json({"ok": True, "message": message, "result": result})
+                return
+
+            if route == "/api/maintenance/repair":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                settings = load_settings()
+                with MAINTENANCE_GATE:
+                    if JOBS.any_running():
+                        raise ValueError("Stop all running engines before repairing the library.")
+                    conn = connect_library(LIBRARY_DB)
+                    try:
+                        result = maintenance.repair(
+                            conn, OUTPUT_DIR, settings.get("categories", []), settings.get("category_aliases", {}),
+                            sublinks_path=SUBLINKS_FILE,
+                        )
+                    finally:
+                        conn.close()
+                self.send_json({"ok": True, "message": "Repair completed.", "result": result})
+                return
+
+            if route == "/api/maintenance/analyze":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    maintenance.analyze(conn)
+                finally:
+                    conn.close()
+                self.send_json({"ok": True, "message": "Query planner statistics refreshed."})
+                return
+
+            if route == "/api/maintenance/vacuum":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                with MAINTENANCE_GATE:
+                    if JOBS.any_running():
+                        raise ValueError("Stop all running engines before compacting the database.")
+                    conn = connect_library(LIBRARY_DB)
+                    try:
+                        maintenance.vacuum(conn)
+                    finally:
+                        conn.close()
+                self.send_json({"ok": True, "message": "Database compacted."})
+                return
+
+            if route == "/api/maintenance/backup":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                note = str(payload.get("note") or "")
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    result = maintenance.create_backup(conn, LIBRARY_DB, ROOT, OUTPUT_DIR, BACKUPS_DIR, keep=5, note=note)
+                finally:
+                    conn.close()
+                self.send_json({"ok": True, "message": f"Backup created: {result['filename']}", "backup": result})
+                return
+
+            if route == "/api/maintenance/restore":
+                filename = str(payload.get("filename") or "")
+                if not filename:
+                    raise ValueError("Choose a backup to restore.")
+                with MAINTENANCE_GATE:
+                    if JOBS.any_running():
+                        raise ValueError("Stop all running engines before restoring a backup.")
+                    result = maintenance.restore_backup(ROOT, OUTPUT_DIR, LIBRARY_DB, BACKUPS_DIR, filename)
+                self.send_json({"ok": True, "message": f"Restored from {filename}. Restart the server to pick up the restored database cleanly.", "result": result})
+                return
+
+            if route == "/api/links/retry-failed":
+                if not LIBRARY_DB.is_file():
+                    raise ValueError("Story library database does not exist yet.")
+                conn = connect_library(LIBRARY_DB)
+                try:
+                    urls = links_store.retryable_failed(conn)
+                    if urls:
+                        conn.executemany(
+                            "UPDATE links SET status='pending', error='' WHERE url=?",
+                            [(u,) for u in urls],
+                        )
+                        conn.commit()
+                finally:
+                    conn.close()
+                self.send_json({"ok": True, "message": f"Queued {len(urls)} transient failure(s) for retry.", "urls": urls})
                 return
 
             if route.startswith("/api/stop/"):
@@ -888,12 +1122,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 with SETTINGS_LOCK:
                     atomic_text(SETTINGS_FILE, json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
                 organization = None
-                if settings.get("categories", []) != old_settings.get("categories", []) and LIBRARY_DB.is_file():
-                    conn = connect_library(LIBRARY_DB)
-                    try:
-                        organization = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []))
-                    finally:
-                        conn.close()
+                if (settings.get("categories", []) != old_settings.get("categories", []) or settings.get("category_aliases", {}) != old_settings.get("category_aliases", {})) and LIBRARY_DB.is_file():
+                    with MAINTENANCE_GATE:
+                        if JOBS.any_running():
+                            raise ValueError("Stop all running engines before changing category rules.")
+                        conn = connect_library(LIBRARY_DB)
+                        try:
+                            organization = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []), settings.get("category_aliases", {}))
+                        finally:
+                            conn.close()
                 self.send_json({"ok": True, "settings": settings, "organization": organization})
                 return
 
@@ -907,7 +1144,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 conn = connect_library(LIBRARY_DB)
                 try:
                     conn.execute(
-                        "UPDATE stories SET status='verified',review_reason='',manual_accept=1,updated_at=? WHERE url=?",
+                        "UPDATE stories SET status='verified',review_reason='',manual_accept=1,"
+                        "source_changed=0,previous_raw_sha256='',updated_at=? WHERE url=?",
                         (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), url),
                     )
                     conn.commit()
@@ -970,12 +1208,15 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     conn = connect_library(LIBRARY_DB)
     try:
+        interrupted = job_store.mark_interrupted_runs(conn)
+        if interrupted:
+            print(f"Job history: marked {interrupted} interrupted run(s) from the previous server process.")
         unorganized = int(conn.execute(
             "SELECT COUNT(*) FROM stories WHERE status IN ('verified','review') AND organized_file=''"
         ).fetchone()[0])
         if unorganized:
             print(f"Library migration: organizing {unorganized} existing story/stories...")
-            result = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []))
+            result = rebuild_library(conn, OUTPUT_DIR, settings.get("categories", []), settings.get("category_aliases", {}))
         else:
             result = write_kindle_manifest(conn, OUTPUT_DIR)
         if result.get("kindle_stories", 0):

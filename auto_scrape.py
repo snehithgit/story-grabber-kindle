@@ -149,6 +149,7 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=20)
     ap.add_argument("--browser-mode", choices=["background", "headless", "visible"], default="background")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--site-profiles", default="", help="JSON object mapping host -> minimum crawl delay in seconds")
     args = ap.parse_args()
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -159,6 +160,8 @@ def main() -> int:
         "--max-pages", str(max(1, args.max_pages)),
         "--delay", str(max(0.0, args.crawl_delay)),
     ]
+    if args.site_profiles:
+        crawler_command.extend(["--site-profiles", args.site_profiles])
     if args.fresh:
         crawler_command.append("--fresh")
 
@@ -194,6 +197,12 @@ def main() -> int:
                     "--concurrency", str(max(1, min(8, args.concurrency))),
                     "--delay", str(max(0, min(60000, args.content_delay))),
                     "--browser-mode", args.browser_mode,
+                    # v3.4 Phase 5: with a small batch size, auto mode calls the
+                    # pipeline (and therefore the Kindle export) once per tiny
+                    # batch. A short debounce coalesces those without delaying
+                    # a normal-sized batch, which always takes far longer than
+                    # this interval to scrape+format anyway.
+                    "--kindle-min-interval", "4",
                 ]
                 pipeline = start_process(command, "scrape")
                 code = wait_process(pipeline)

@@ -9,6 +9,7 @@ const state = {
   linksPage: 1,
   storiesPage: 1,
   selectedLinks: new Set(),
+  selectedStories: new Set(),
   selectedJob: "auto",
   readerStory: null,
   readerTab: "formatted",
@@ -68,8 +69,9 @@ async function renderRoute() {
       const requestedStatus = new URLSearchParams(location.search).get("status");
       if (["all", "verified", "review", "failed"].includes(requestedStatus)) $("#story-status").value = requestedStatus;
       await loadStories(1);
+      await loadSeries();
     }
-    if (page === "settings") await loadSettings();
+    if (page === "settings") { await loadSettings(); await loadMaintenance(); }
     if (page === "story") await loadReader();
   } catch (error) { toast(error.message, "error"); }
 }
@@ -95,25 +97,39 @@ function folderLabel(item) {
   return item.category && item.category !== "Uncategorized" ? `📁 ${item.category}` : "—";
 }
 
-function renderRows(tbody, items, compact = false) {
+const CATEGORY_SOURCE_LABEL = { title: "matched title", content: "matched story content", manual: "set manually", none: "no match" };
+
+function renderRows(tbody, items, compact = false, selectable = false) {
   tbody.replaceChildren();
   if (!items.length) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state">No stories found.</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">No stories found.</div></td></tr>`;
     return;
   }
   for (const item of items) {
     const row = document.createElement("tr");
+    const selectCell = selectable
+      ? `<td class="select-cell mobile-meta" data-label="Select"><input class="story-check" type="checkbox" aria-label="Select story" ${state.selectedStories.has(item.url) ? "checked" : ""}></td>`
+      : "";
     if (compact) {
-      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
+      row.innerHTML = `${selectCell}<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
       $("strong", row).textContent = item.title || "Untitled";
       $("small", row).textContent = item.source_host || item.url;
       $(".folder-cell", row).textContent = folderLabel(item);
     } else {
-      row.innerHTML = `<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="category-cell mobile-meta" data-label="Category"></td><td class="words-cell mobile-meta" data-label="Words">${fmt(item.words)}</td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
+      row.innerHTML = `${selectCell}<td class="story-cell"><strong></strong><small></small></td><td class="folder-cell mobile-meta" data-label="Folder"></td><td class="category-cell mobile-meta" data-label="Category"></td><td class="words-cell mobile-meta" data-label="Words">${fmt(item.words)}</td><td class="status-cell mobile-meta" data-label="Status">${statusPill(item.status)}</td><td class="row-actions"><button class="btn small open-story" type="button">Read</button></td>`;
       $("strong", row).textContent = item.title || "Untitled";
       $("small", row).textContent = item.status === "review" && item.review_reason ? item.review_reason : item.url;
       $(".folder-cell", row).textContent = item.part_number != null ? `📁 ${item.series_title} / Part ${item.part_number}` : "Single story";
-      $(".category-cell", row).textContent = item.category || "Uncategorized";
+      const categoryCell = $(".category-cell", row);
+      categoryCell.textContent = item.category || "Uncategorized";
+      const reason = CATEGORY_SOURCE_LABEL[item.category_source] || "";
+      if (reason) categoryCell.title = `Category ${reason}`;
+    }
+    if (selectable) {
+      $(".story-check", row).addEventListener("change", event => {
+        if (event.target.checked) state.selectedStories.add(item.url); else state.selectedStories.delete(item.url);
+        updateStorySelection();
+      });
     }
     $(".open-story", row).addEventListener("click", () => navigate(`/story?url=${encodeURIComponent(item.url)}`));
     tbody.append(row);
@@ -210,15 +226,21 @@ async function startContent(payload = {}) {
 }
 
 function populateCategoryFilter() {
-  const select = $("#story-category");
-  const current = select.value || "all";
-  select.innerHTML = '<option value="all">All categories</option>';
-  for (const name of state.settings?.categories || []) {
-    const option = document.createElement("option"); option.value = name; option.textContent = name; select.append(option);
+  for (const select of [$("#story-category"), $("#bulk-category-select")]) {
+    const isFilter = select.id === "story-category";
+    const current = select.value || (isFilter ? "all" : "");
+    select.innerHTML = isFilter ? '<option value="all">All categories</option>' : '<option value="">Move to category…</option>';
+    for (const name of state.settings?.categories || []) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name; select.append(option);
+    }
+    if (isFilter) {
+      const uncategorized = document.createElement("option"); uncategorized.value = "Uncategorized"; uncategorized.textContent = "Uncategorized"; select.append(uncategorized);
+    }
+    if ([...select.options].some(o => o.value === current)) select.value = current;
   }
-  const uncategorized = document.createElement("option"); uncategorized.value = "Uncategorized"; uncategorized.textContent = "Uncategorized"; select.append(uncategorized);
-  if ([...select.options].some(o => o.value === current)) select.value = current;
 }
+
+function updateStorySelection() { $("#stories-selection-count").textContent = `${fmt(state.selectedStories.size)} selected`; }
 
 async function loadStories(page = 1) {
   if (!state.settings) await loadSummary();
@@ -230,7 +252,9 @@ async function loadStories(page = 1) {
   const sort = $("#story-sort").value || "newest";
   const per = state.settings?.stories_per_page || 50;
   const data = await api(`/api/stories?page=${page}&per_page=${per}&q=${q}&category=${category}&status=${status}&sort=${sort}`);
-  renderRows($("#stories-table"), data.items, false);
+  renderRows($("#stories-table"), data.items, false, true);
+  $("#stories-select-all").checked = false;
+  updateStorySelection();
   renderPagination($("#stories-pagination"), data, loadStories);
 }
 
@@ -249,6 +273,15 @@ function renderPagination(container, data, callback) {
 function jobLabel(name) { return { auto: "Auto crawl + scrape", links: "Crawler", content: "Scraper", format: "Formatter" }[name] || name; }
 function isActive(job) { return job && ["running", "stopping"].includes(job.state); }
 
+// v3.4 P1 "adaptive polling": don't hammer /api/status and /api/summary on a
+// fixed timer regardless of what's happening. Job polling runs fast only
+// while an engine is actually active, backs off when idle, and stops
+// completely while the tab is hidden. The summary refresh is driven by the
+// same loop: it fires immediately the moment a job finishes (so the
+// Dashboard updates right away instead of waiting for the next tick) and
+// otherwise refreshes on a slow, visibility-aware cadence.
+let wasJobActive = false;
+
 async function pollJobs() {
   try {
     state.jobs = await api("/api/status/all");
@@ -257,7 +290,17 @@ async function pollJobs() {
     $("#job-chip-text").textContent = active ? `${jobLabel(active.name)} · ${active.state}` : "Idle";
     $("#engine-summary").textContent = active ? `${jobLabel(active.name)} running` : "Idle";
     if (routePage() === "dashboard") renderJobs();
-  } catch {}
+    const isActiveNow = Boolean(active);
+    if (wasJobActive && !isActiveNow && ["dashboard", "sources", "stories"].includes(routePage())) {
+      // A job just finished: refresh the summary right away rather than
+      // waiting up to 30s for the next slow-cadence tick.
+      try { await loadSummary(); } catch {}
+    }
+    wasJobActive = isActiveNow;
+    return isActiveNow;
+  } catch {
+    return wasJobActive;
+  }
 }
 
 function renderJobs() {
@@ -285,6 +328,45 @@ async function stopJob(name) {
   } catch (error) { toast(error.message, "error"); }
 }
 
+function aliasesToText(value) {
+  if (!value || typeof value !== "object") return "";
+  return Object.entries(value).map(([name, aliases]) => `${name} = ${(aliases || []).join(", ")}`).join("\n");
+}
+
+function aliasesFromText(value) {
+  const out = {};
+  for (const raw of String(value || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const at = line.indexOf("=");
+    if (at < 1) continue;
+    const name = line.slice(0, at).trim();
+    const aliases = line.slice(at + 1).split(/[,|]/).map(v => v.trim()).filter(Boolean);
+    if (name && aliases.length) out[name] = aliases;
+  }
+  return out;
+}
+
+// v3.7: per-site crawl-delay overrides, edited the same "key = value" way as category aliases.
+function siteProfilesToText(value) {
+  if (!value || typeof value !== "object") return "";
+  return Object.entries(value).map(([host, seconds]) => `${host} = ${seconds}`).join("\n");
+}
+
+function siteProfilesFromText(value) {
+  const out = {};
+  for (const raw of String(value || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const at = line.indexOf("=");
+    if (at < 1) continue;
+    const host = line.slice(0, at).trim().toLowerCase();
+    const seconds = Number(line.slice(at + 1).trim());
+    if (host && Number.isFinite(seconds) && seconds >= 0) out[host] = seconds;
+  }
+  return out;
+}
+
 async function loadSettings() {
   const settings = await api("/api/settings");
   state.settings = settings;
@@ -293,8 +375,98 @@ async function loadSettings() {
     const input = form.elements.namedItem(key);
     if (!input) continue;
     if (key === "categories") input.value = (value || []).join("\n");
+    else if (key === "category_aliases") input.value = aliasesToText(value);
+    else if (key === "site_profiles") input.value = siteProfilesToText(value);
     else if (input.type === "checkbox") input.checked = Boolean(value);
     else input.value = value;
+  }
+}
+
+// v3.6 maintenance panel
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n, index = -1;
+  do { value /= 1024; index++; } while (value >= 1024 && index < units.length - 1);
+  return `${value.toFixed(1)} ${units[index]}`;
+}
+
+async function loadMaintenance() {
+  await Promise.all([loadMaintenanceStorage(), loadBackups(), loadJobsHistory()]);
+}
+
+async function loadMaintenanceStorage() {
+  const health = await api("/api/maintenance/storage");
+  $("#maintenance-storage").textContent =
+    `${fmt(health.story_count)} stories · ${fmt(health.link_count)} links · database ${formatBytes(health.database_bytes)} · ` +
+    `raw ${formatBytes(health.raw_pages_bytes)} · formatted ${formatBytes(health.formatted_pages_bytes)} · library ${formatBytes(health.library_bytes)}`;
+}
+
+function renderIntegrityIssues(result) {
+  const container = $("#maintenance-issues");
+  container.replaceChildren();
+  if (!result.issue_count) { container.innerHTML = '<div class="empty-state">No integrity issues found.</div>'; return; }
+  const summary = document.createElement("div");
+  summary.className = "muted";
+  summary.textContent = `${fmt(result.issue_count)} issue(s) found (checked ${new Date(result.checked_at).toLocaleString()})`;
+  container.append(summary);
+  for (const issue of result.issues.slice(0, 200)) {
+    const row = document.createElement("div");
+    row.className = "series-row";
+    row.innerHTML = `<div class="series-row-top"><strong></strong><span class="muted"></span></div>`;
+    $("strong", row).textContent = issue.type.replace(/_/g, " ");
+    $(".muted", row).textContent = issue.url ? `${issue.url} — ${issue.detail}` : issue.detail;
+    container.append(row);
+  }
+}
+
+async function loadBackups() {
+  const data = await api("/api/maintenance/backups");
+  const container = $("#backups-list");
+  container.replaceChildren();
+  $("#backups-count").textContent = data.backups.length ? `(${fmt(data.backups.length)})` : "";
+  if (!data.backups.length) { container.innerHTML = '<div class="empty-state">No backups yet.</div>'; return; }
+  for (const backup of data.backups) {
+    const row = document.createElement("div");
+    row.className = "series-row";
+    row.innerHTML = `<div class="series-row-top"><strong></strong><span class="muted"></span></div>`;
+    $("strong", row).textContent = `${backup.filename} — ${formatBytes(backup.size_bytes)}`;
+    $(".muted", row).textContent = new Date(backup.created_at).toLocaleString() + (backup.note ? ` · ${backup.note}` : "");
+    const restoreButton = document.createElement("button");
+    restoreButton.className = "btn small";
+    restoreButton.type = "button";
+    restoreButton.textContent = "Restore";
+    restoreButton.addEventListener("click", () => restoreBackup(backup.filename));
+    $(".series-row-top", row).append(restoreButton);
+    container.append(row);
+  }
+}
+
+async function restoreBackup(filename) {
+  if (!confirm(`Restore "${filename}"? The current database will be moved aside as a .before-restore file first. Stop all running engines before continuing.`)) return;
+  try {
+    const result = await api("/api/maintenance/restore", { method: "POST", body: JSON.stringify({ filename }) });
+    toast(result.message, "success");
+    await loadMaintenance();
+  } catch (error) { toast(error.message, "error"); }
+}
+
+async function loadJobsHistory() {
+  const data = await api("/api/jobs/history");
+  const container = $("#jobs-history-list");
+  container.replaceChildren();
+  $("#jobs-history-count").textContent = data.runs.length ? `(${fmt(data.runs.length)})` : "";
+  if (!data.runs.length) { container.innerHTML = '<div class="empty-state">No job runs recorded yet.</div>'; return; }
+  for (const run of data.runs.slice(0, 100)) {
+    const row = document.createElement("div");
+    row.className = "series-row";
+    const pillClass = run.state === "complete" ? "ok" : run.state === "failed" ? "bad" : run.state === "running" ? "warn" : "";
+    row.innerHTML = `<div class="series-row-top"><strong></strong><span class="pill ${pillClass}"></span></div><div class="muted"></div>`;
+    $("strong", row).textContent = `${run.name} — started ${new Date(run.started_at).toLocaleString()}`;
+    $(".pill", row).textContent = run.state;
+    $(".muted", row).textContent = run.error || (run.finished_at ? `finished ${new Date(run.finished_at).toLocaleString()}` : "");
+    container.append(row);
   }
 }
 
@@ -314,6 +486,7 @@ async function loadReader() {
     story.integrity_exact ? "✓ source text exact" : "text check failed",
     story.quality_pass ? "✓ readability checked" : story.manual_accept ? "manual accept" : "review needed",
     story.romanized ? "romanized" : "original script",
+    CATEGORY_SOURCE_LABEL[story.category_source] ? `category ${CATEGORY_SOURCE_LABEL[story.category_source]}` : null,
   ].filter(Boolean);
   $("#reader-meta").replaceChildren(...qualityBits.map(value => { const span = document.createElement("span"); span.textContent = value; return span; }));
   $("#open-original").href = story.url;
@@ -399,7 +572,7 @@ $("#story-search").addEventListener("input", debounce(() => loadStories(1)));
 for (const id of ["story-category", "story-status", "story-sort"]) $("#" + id).addEventListener("change", () => loadStories(1));
 $("#recategorize-library").addEventListener("click", async () => {
   const button = $("#recategorize-library");
-  if (!confirm("Re-categorize all existing stories using title first, then story content? This only rebuilds the organized library; raw/formatted stories are not changed.")) return;
+  if (!confirm("Re-categorize all existing stories using title first, then story content, including category aliases? This only rebuilds the organized library; raw/formatted stories are not changed.")) return;
   button.disabled = true;
   const oldText = button.textContent;
   button.textContent = "Re-categorizing…";
@@ -420,6 +593,91 @@ $("#run-formatter").addEventListener("click", async () => {
   catch (error) { toast(error.message, "error"); }
 });
 
+// v3.5 bulk category editor
+$("#stories-select-all").addEventListener("change", event => $$("#stories-table .story-check").forEach(box => { if (box.checked !== event.target.checked) box.click(); }));
+$("#bulk-move").addEventListener("click", async () => {
+  const category = $("#bulk-category-select").value;
+  if (!state.selectedStories.size) { toast("Select at least one story.", "error"); return; }
+  if (!category) { toast("Choose a category first.", "error"); return; }
+  try {
+    const result = await api("/api/library/bulk", { method: "POST", body: JSON.stringify({ urls: [...state.selectedStories], action: "set_category", category }) });
+    toast(result.message, "success");
+    state.selectedStories.clear();
+    await loadStories(state.storiesPage);
+  } catch (error) { toast(error.message, "error"); }
+});
+$("#bulk-unlock").addEventListener("click", async () => {
+  if (!state.selectedStories.size) { toast("Select at least one story.", "error"); return; }
+  try {
+    const result = await api("/api/library/bulk", { method: "POST", body: JSON.stringify({ urls: [...state.selectedStories], action: "unlock" }) });
+    toast(result.message, "success");
+    state.selectedStories.clear();
+    await loadStories(state.storiesPage);
+  } catch (error) { toast(error.message, "error"); }
+});
+
+// v3.5 series manager
+async function loadSeries() {
+  const data = await api("/api/library/series");
+  const container = $("#series-list");
+  container.replaceChildren();
+  $("#series-count").textContent = data.series.length ? `(${fmt(data.series.length)})` : "";
+  if (!data.series.length) { container.innerHTML = '<div class="empty-state">No multipart series yet.</div>'; return; }
+  for (const series of data.series) {
+    const row = document.createElement("div");
+    row.className = "series-row";
+    const missing = series.missing_parts.length ? `<span class="pill warn">Missing part ${series.missing_parts.join(", ")}</span>` : "";
+    row.innerHTML = `<div class="series-row-top"><strong></strong><span class="muted"></span>${missing}</div>`;
+    $("strong", row).textContent = series.series_title;
+    $(".muted", row).textContent = `${series.category} · ${series.part_count} part(s)`;
+    container.append(row);
+  }
+}
+
+// v3.5 duplicate detection
+async function loadDuplicates() {
+  const button = $("#scan-duplicates");
+  button.disabled = true;
+  const oldText = button.textContent;
+  button.textContent = "Scanning…";
+  try {
+    const data = await api("/api/library/duplicates");
+    const container = $("#duplicates-list");
+    container.replaceChildren();
+    $("#duplicates-count").textContent = data.group_count ? `(${fmt(data.group_count)})` : "";
+    if (data.fuzzy_skipped_buckets) {
+      const warning = document.createElement("div");
+      warning.className = "notice warning";
+      warning.textContent = `Fuzzy title scan skipped ${fmt(data.fuzzy_skipped_stories)} stories across ${fmt(data.fuzzy_skipped_buckets)} oversized word-count bucket(s). Exact/hash checks still ran.`;
+      container.append(warning);
+    }
+    if (!data.group_count) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = data.fuzzy_skipped_buckets ? "No duplicates found in the portions that were checked." : "No likely duplicates found.";
+      container.append(empty);
+      return;
+    }
+    for (const group of data.groups) {
+      const row = document.createElement("div");
+      row.className = "duplicate-group";
+      row.innerHTML = `<div class="duplicate-reason"></div>`;
+      $(".duplicate-reason", row).textContent = group.detail;
+      for (const story of group.stories) {
+        const link = document.createElement("a");
+        link.href = `/story?url=${encodeURIComponent(story.url)}`;
+        link.textContent = `${story.title || story.url} (${story.category || "Uncategorized"})`;
+        row.append(link);
+      }
+      container.append(row);
+    }
+  } finally {
+    button.disabled = false;
+    button.textContent = oldText;
+  }
+}
+$("#scan-duplicates").addEventListener("click", () => loadDuplicates().catch(error => toast(error.message, "error")));
+
 // Settings
 $("#settings-form").addEventListener("submit", async event => {
   event.preventDefault();
@@ -427,6 +685,8 @@ $("#settings-form").addEventListener("submit", async event => {
   for (const input of form.elements) {
     if (!input.name) continue;
     if (input.name === "categories") payload.categories = input.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+    else if (input.name === "category_aliases") payload.category_aliases = aliasesFromText(input.value);
+    else if (input.name === "site_profiles") payload.site_profiles = siteProfilesFromText(input.value);
     else payload[input.name] = input.type === "checkbox" ? input.checked : input.value;
   }
   try {
@@ -436,6 +696,32 @@ $("#settings-form").addEventListener("submit", async event => {
     toast("Settings saved.", "success");
   } catch (error) { $("#settings-message").textContent = error.message; toast(error.message, "error"); }
 });
+
+// v3.6 maintenance actions
+async function runMaintenanceAction(button, path, { confirmMessage, successMessage, method = "POST", refresh = true } = {}) {
+  if (confirmMessage && !confirm(confirmMessage)) return;
+  const oldText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Working…";
+  try {
+    const result = await api(path, method === "POST" ? { method: "POST", body: JSON.stringify({}) } : {});
+    if (path === "/api/maintenance/integrity") renderIntegrityIssues(result);
+    toast(successMessage || result.message || "Done.", "success");
+    if (refresh) await loadMaintenance();
+    return result;
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = oldText;
+  }
+}
+$("#run-integrity-check").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/maintenance/integrity", { method: "GET", refresh: false, successMessage: "Integrity check complete." }));
+$("#run-repair").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/maintenance/repair", { confirmMessage: "Repair rebuilds the search index and organized library from the database. Continue?" }));
+$("#run-analyze").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/maintenance/analyze", { refresh: false }));
+$("#run-vacuum").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/maintenance/vacuum", { confirmMessage: "Vacuuming compacts the database file; it can take a while on a large library. Continue?", refresh: false }));
+$("#run-backup").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/maintenance/backup"));
+$("#retry-failed-links").addEventListener("click", event => runMaintenanceAction(event.currentTarget, "/api/links/retry-failed", { refresh: false }));
 
 // Reader / review
 $$('[data-reader-tab]').forEach(button => button.addEventListener("click", () => { state.readerTab = button.dataset.readerTab; renderReader(); }));
@@ -450,14 +736,46 @@ function applyTheme(value) { document.documentElement.dataset.theme = value === 
 let theme = localStorage.getItem("story-grabber-theme") || "system"; applyTheme(theme);
 themeButton.addEventListener("click", () => { theme = theme === "system" ? "light" : theme === "light" ? "dark" : "system"; localStorage.setItem("story-grabber-theme", theme); applyTheme(theme); });
 
+const POLL_ACTIVE_MS = 1500;      // a job is running: check often
+const POLL_IDLE_MS = 6000;        // nothing running: check occasionally
+const SUMMARY_IDLE_MS = 25000;    // slow background refresh while idle
+
+function schedulePolling() {
+  let summaryTimer = 0;
+
+  const tick = async () => {
+    if (document.hidden) {
+      // Tab is in the background: stop polling entirely rather than
+      // burning battery/requests on a page nobody is looking at. A single
+      // visibilitychange listener (below) resumes immediately on return.
+      return;
+    }
+    const active = await pollJobs();
+    setTimeout(tick, active ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+  };
+
+  const summaryTick = async () => {
+    if (!document.hidden && ["dashboard", "sources", "stories"].includes(routePage())) {
+      try { await loadSummary(); } catch {}
+    }
+    summaryTimer = setTimeout(summaryTick, SUMMARY_IDLE_MS);
+  };
+
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      tick();
+      clearTimeout(summaryTimer);
+      summaryTick();
+    }
+  });
+
+  tick();
+  summaryTick();
+}
+
 (async function init() {
   await pollJobs();
   try { await loadSummary(); } catch {}
   await renderRoute();
-  setInterval(pollJobs, 1500);
-  setInterval(async () => {
-    if (["dashboard", "sources", "stories"].includes(routePage())) {
-      try { await loadSummary(); } catch {}
-    }
-  }, 8000);
+  schedulePolling();
 })();
